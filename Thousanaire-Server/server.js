@@ -14,9 +14,6 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 10000;
 
-/* ============================================================
-   ROOM STRUCTURE
-   ============================================================ */
 /*
 rooms = {
   ROOMID: {
@@ -45,7 +42,7 @@ function createRoomId() {
 
 function getNextSeat(room, seat) {
   for (let i = 1; i <= 4; i++) {
-    const s = (seat + i) % 4;
+    const s = (seat + i + 4) % 4;
     if (room.players[s] && !room.players[s].eliminated) return s;
   }
   return seat;
@@ -93,6 +90,39 @@ function broadcastState(roomId) {
   io.to(roomId).emit("stateUpdate", state);
 }
 
+function handleZeroChipsOnTurn(roomId, seat) {
+  const room = rooms[roomId];
+  const player = room.players[seat];
+  if (!player) return;
+
+  if (player.chips === 0) {
+    if (player.danger) {
+      player.eliminated = true;
+    } else {
+      player.danger = true;
+    }
+  }
+
+  const count = countPlayersWithChips(room);
+  if (count === 1) {
+    const winnerSeat = getLastPlayerWithChips(room);
+    const winner = room.players[winnerSeat];
+
+    io.to(roomId).emit("gameOver", {
+      winnerSeat,
+      winnerName: winner.name,
+      pot: room.centerPot
+    });
+
+    broadcastState(roomId);
+    return true;
+  }
+
+  room.currentPlayer = getNextSeat(room, seat);
+  broadcastState(roomId);
+  return false;
+}
+
 /* ============================================================
    MAIN SOCKET LOGIC
    ============================================================ */
@@ -134,12 +164,20 @@ io.on("connection", (socket) => {
     socket.emit("joinedRoom", { roomId, seat: null });
   });
 
-  /* ---------------- JOIN SEAT ---------------- */
+  /* ---------------- JOIN SEAT (ONE-TIME) ---------------- */
   socket.on("joinSeat", ({ roomId, name, avatar, color }) => {
     const room = rooms[roomId];
     if (!room) return;
 
-    // Assign next available seat (0→1→2→3)
+    // Prevent same socket from joining multiple seats
+    const existingSeat = Object.entries(room.players)
+      .find(([s, p]) => p && p.socketId === socket.id);
+    if (existingSeat) {
+      socket.emit("errorMessage", "You already joined this game.");
+      return;
+    }
+
+    // First player (host) gets seat 0 (top), others clockwise 1,2,3
     let seat = null;
     for (let i = 0; i < 4; i++) {
       if (!room.players[i]) {
@@ -173,28 +211,27 @@ io.on("connection", (socket) => {
     const room = rooms[roomId];
     if (!room) return;
 
-    const seat = Object.entries(room.players)
+    const seatEntry = Object.entries(room.players)
       .find(([s, p]) => p && p.socketId === socket.id);
+    if (!seatEntry) return;
 
-    if (!seat) return;
-    const playerSeat = parseInt(seat[0]);
-
+    const playerSeat = parseInt(seatEntry[0]);
     if (playerSeat !== room.currentPlayer) return;
 
     const player = room.players[playerSeat];
     if (player.eliminated) return;
 
-    // If player has 0 chips, skip turn
+    // If player has 0 chips at start of turn, handle danger/elimination
     if (player.chips === 0) {
-      player.danger = true;
-      room.currentPlayer = getNextSeat(room, playerSeat);
-      broadcastState(roomId);
+      const ended = handleZeroChipsOnTurn(roomId, playerSeat);
+      if (!ended) {
+        // Turn passed; no roll
+      }
       return;
     }
 
     room.gameStarted = true;
 
-    // Roll dice
     const numDice = Math.min(player.chips, 3);
     const faces = ["Left", "Right", "Hub", "Dottt", "Wild"];
     const outcomes = [];
@@ -203,9 +240,15 @@ io.on("connection", (socket) => {
       outcomes.push(faces[Math.floor(Math.random() * faces.length)]);
     }
 
+    // Tell clients to animate dice + history
+    io.to(roomId).emit("rollResult", {
+      seat: playerSeat,
+      outcomes,
+      outcomesText: outcomes.join(", ")
+    });
+
     const wildCount = outcomes.filter(o => o === "Wild").length;
 
-    // Triple wild → special prompt
     if (wildCount === 3) {
       io.to(player.socketId).emit("requestTripleWildChoice", {
         roomId,
@@ -214,7 +257,6 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // Normal wilds → prompt client for choices
     if (wildCount > 0) {
       io.to(player.socketId).emit("requestWildChoice", {
         roomId,
@@ -224,7 +266,6 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // No wilds → apply outcomes immediately
     applyOutcomes(roomId, playerSeat, outcomes);
   });
 
@@ -233,12 +274,11 @@ io.on("connection", (socket) => {
     const room = rooms[roomId];
     if (!room) return;
 
-    const seat = Object.entries(room.players)
+    const seatEntry = Object.entries(room.players)
       .find(([s, p]) => p && p.socketId === socket.id);
-    if (!seat) return;
+    if (!seatEntry) return;
 
-    const playerSeat = parseInt(seat[0]);
-
+    const playerSeat = parseInt(seatEntry[0]);
     applyWildActions(roomId, playerSeat, actions);
   });
 
@@ -247,12 +287,11 @@ io.on("connection", (socket) => {
     const room = rooms[roomId];
     if (!room) return;
 
-    const seat = Object.entries(room.players)
+    const seatEntry = Object.entries(room.players)
       .find(([s, p]) => p && p.socketId === socket.id);
-    if (!seat) return;
+    if (!seatEntry) return;
 
-    const playerSeat = parseInt(seat[0]);
-
+    const playerSeat = parseInt(seatEntry[0]);
     applyTripleWild(roomId, playerSeat, choice);
   });
 
@@ -314,16 +353,39 @@ function applyOutcomes(roomId, seat, outcomes) {
       const leftSeat = getNextSeat(room, seat);
       player.chips--;
       room.players[leftSeat].chips++;
+
+      io.to(roomId).emit("chipTransfer", {
+        fromSeat: seat,
+        toSeat: leftSeat,
+        type: "left"
+      });
     }
     if (o === "Right" && player.chips > 0) {
-      const rightSeat = getNextSeat(room, seat - 2); // reverse direction
+      const rightSeat = getNextSeat(room, seat - 2);
       player.chips--;
       room.players[rightSeat].chips++;
+
+      io.to(roomId).emit("chipTransfer", {
+        fromSeat: seat,
+        toSeat: rightSeat,
+        type: "right"
+      });
     }
     if (o === "Hub" && player.chips > 0) {
       player.chips--;
       room.centerPot++;
+
+      io.to(roomId).emit("chipTransfer", {
+        fromSeat: seat,
+        toSeat: null,
+        type: "hub"
+      });
     }
+  });
+
+  io.to(roomId).emit("historyEntry", {
+    playerName: player.name,
+    outcomesText: outcomes.join(", ")
   });
 
   finalizeTurn(roomId, seat);
@@ -335,13 +397,19 @@ function applyWildActions(roomId, seat, actions) {
 
   actions.forEach(a => {
     if (a.type === "cancel") {
-      // Canceling is handled implicitly by not applying that outcome
+      // Cancel is implicit: we just don't apply that outcome
     }
     if (a.type === "steal") {
       const target = room.players[a.from];
       if (target && target.chips > 0) {
         target.chips--;
         player.chips++;
+
+        io.to(roomId).emit("chipTransfer", {
+          fromSeat: a.from,
+          toSeat: seat,
+          type: "steal"
+        });
       }
     }
   });
@@ -354,20 +422,34 @@ function applyTripleWild(roomId, seat, choice) {
   const player = room.players[seat];
 
   if (choice.type === "takePot") {
-    player.chips += room.centerPot;
+    if (room.centerPot > 0) {
+      player.chips += room.centerPot;
+
+      io.to(roomId).emit("chipTransfer", {
+        fromSeat: null,
+        toSeat: seat,
+        type: "takePot"
+      });
+    }
     room.centerPot = 0;
   }
 
   if (choice.type === "steal3") {
     let steals = 3;
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 4 && steals > 0; i++) {
       if (i === seat) continue;
       const target = room.players[i];
-      if (target && target.chips > 0 && steals > 0) {
+      if (target && target.chips > 0) {
         const amount = Math.min(target.chips, steals);
         target.chips -= amount;
         player.chips += amount;
         steals -= amount;
+
+        io.to(roomId).emit("chipTransfer", {
+          fromSeat: i,
+          toSeat: seat,
+          type: "steal3"
+        });
       }
     }
   }
@@ -379,7 +461,6 @@ function finalizeTurn(roomId, seat) {
   const room = rooms[roomId];
   const player = room.players[seat];
 
-  // Danger logic
   if (player.chips === 0) {
     if (player.danger) {
       player.eliminated = true;
@@ -390,7 +471,6 @@ function finalizeTurn(roomId, seat) {
     player.danger = false;
   }
 
-  // Instant win if only one player has chips
   const count = countPlayersWithChips(room);
   if (count === 1) {
     const winnerSeat = getLastPlayerWithChips(room);
@@ -406,9 +486,7 @@ function finalizeTurn(roomId, seat) {
     return;
   }
 
-  // Advance turn
   room.currentPlayer = getNextSeat(room, seat);
-
   broadcastState(roomId);
 }
 
