@@ -48,6 +48,7 @@ HELPER FUNCTIONS
 ============================================================ */
 
 function getNextSeat(room, seat) {
+  // Clockwise, skipping eliminated seats
   for (let i = 1; i <= 4; i++) {
     const s = (seat + i + 4) % 4;
     if (room.players[s] && !room.players[s].eliminated) return s;
@@ -113,6 +114,7 @@ function handleZeroChipsOnTurn(roomId, seat) {
           winnerName: winner.name,
           pot: room.centerPot
         });
+        // winner will take pot in finalizeTurn logic if needed
         broadcastState(roomId);
         return true;
       }
@@ -498,26 +500,49 @@ function finalizeTurn(roomId, seat) {
   const player = room.players[seat];
   const playersWithChips = countPlayersWithChips(room);
 
+  // Clear danger if player recovered chips
   if (player.chips > 0) {
     player.danger = false;
     const graceKey = `${roomId}-${seat}`;
     graceRoundPlayers.delete(graceKey);
   }
 
+  // Game ends ONLY when exactly 1 player has chips
   if (playersWithChips === 1) {
     const winnerSeat = getLastPlayerWithChips(room);
     const winner = room.players[winnerSeat];
+
     io.to(roomId).emit("gameOver", {
       winnerSeat,
       winnerName: winner.name,
       pot: room.centerPot
     });
+
+    // Winner takes pot
+    if (winner) {
+      winner.chips += room.centerPot;
+    }
+    room.centerPot = 0;
+
     broadcastState(roomId);
+    console.log(`🏆 ${winner.name} WINS ${roomId}! Final chips: ${winner.chips}`);
     return;
   }
 
+  // Always continue clockwise, skipping eliminated / 0-chip players
   room.currentPlayer = getNextSeat(room, seat);
-  console.log(`➡️ Turn → ${room.players[room.currentPlayer]?.name || 'Seat ' + room.currentPlayer} (seat ${room.currentPlayer})`);
+  while (
+    room.players[room.currentPlayer]?.eliminated ||
+    room.players[room.currentPlayer]?.chips === 0
+  ) {
+    room.currentPlayer = getNextSeat(room, room.currentPlayer);
+  }
+
+  console.log(
+    `➡️ Turn → ${room.players[room.currentPlayer]?.name || "Seat " + room.currentPlayer
+    } (seat ${room.currentPlayer}) - ${playersWithChips} players remain`
+  );
+
   broadcastState(roomId);
 }
 
