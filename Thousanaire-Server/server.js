@@ -5,11 +5,16 @@ const { Server } = require("socket.io");
 const app = express();
 const server = http.createServer(app);
 
+// 🚀 COMPLETE FIXED SERVER INITIALIZATION - MOBILE FRIENDLY
 const io = new Server(server, {
   cors: {
-    origin: "*", 
+    origin: "*",
     methods: ["GET", "POST"]
-  }
+  },
+  // 🎯 MOBILE TIMEOUT FIX - Survives screen timeout (20 minutes)
+  pingTimeout: 1200000, // 20 minutes before disconnect (default: 20s)
+  pingInterval: 25000,  // Ping every 25 seconds (default: 25s)
+  connectTimeout: 10000 // 10s connection timeout
 });
 
 const PORT = process.env.PORT || 10000;
@@ -39,8 +44,8 @@ function createRoomId() {
 }
 
 /* ============================================================
-   HELPER FUNCTIONS
-   ============================================================ */
+HELPER FUNCTIONS
+============================================================ */
 
 function getNextSeat(room, seat) {
   for (let i = 1; i <= 4; i++) {
@@ -136,8 +141,8 @@ function handleZeroChipsOnTurn(roomId, seat) {
 }
 
 /* ============================================================
-   MAIN SOCKET LOGIC
-   ============================================================ */
+MAIN SOCKET LOGIC
+============================================================ */
 
 io.on("connection", (socket) => {
   console.log("Client connected:", socket.id);
@@ -148,7 +153,7 @@ io.on("connection", (socket) => {
     rooms[roomId] = {
       players: { 0: null, 1: null, 2: null, 3: null },
       centerPot: 0,
-      currentPlayer: 0,  // 🎯 HOST ALWAYS STARTS AT SEAT 0
+      currentPlayer: 0, // 🎯 HOST ALWAYS STARTS AT SEAT 0
       gameStarted: false
     };
     socket.join(roomId);
@@ -198,12 +203,12 @@ io.on("connection", (socket) => {
 
     let seat = null;
     const seatedCount = Object.values(room.players).filter(p => p !== null).length;
-    
+
     // 🎯 RULE 1: FIRST PLAYER = HOST = SEAT 0 ALWAYS
     if (seatedCount === 0) {
       seat = 0;
       console.log(`🎯 HOST "${name}" AUTO-ASSIGNED SEAT 0 in ${roomId}`);
-    } 
+    }
     // 🎯 RULE 2: Others fill seats 1,2,3
     else {
       for (let i = 1; i < 4; i++) {
@@ -270,7 +275,7 @@ io.on("connection", (socket) => {
     }
 
     room.gameStarted = true;
-    broadcastState(roomId);  // 🎯 FIX: Notify all clients game started!
+    broadcastState(roomId); // 🎯 FIX: Notify all clients game started!
 
     const numDice = Math.min(player.chips, 3);
     const faces = ["Left", "Right", "Hub", "Dottt", "Wild"];
@@ -348,7 +353,7 @@ io.on("connection", (socket) => {
     }
 
     room.centerPot = 0;
-    room.currentPlayer = 0;  // Reset to Host (seat 0)
+    room.currentPlayer = 0; // Reset to Host (seat 0)
     room.gameStarted = false;
     broadcastState(roomId);
   });
@@ -359,7 +364,7 @@ io.on("connection", (socket) => {
 
     for (const roomId in rooms) {
       const room = rooms[roomId];
-      
+
       for (let seat = 0; seat < 4; seat++) {
         const p = room.players[seat];
         if (p && p.socketId === socket.id) {
@@ -369,7 +374,7 @@ io.on("connection", (socket) => {
       }
 
       const seatedPlayers = Object.values(room.players).filter(p => p !== null).length;
-      
+
       if (seatedPlayers === 0) {
         console.log(`Room ${roomId} empty - keeping alive 5min`);
       } else {
@@ -380,8 +385,8 @@ io.on("connection", (socket) => {
 });
 
 /* ============================================================
-   GAME LOGIC FUNCTIONS
-   ============================================================ */
+GAME LOGIC FUNCTIONS
+============================================================ */
 
 function applyOutcomes(roomId, seat, outcomes) {
   const room = rooms[roomId];
@@ -495,8 +500,8 @@ function finalizeTurn(roomId, seat) {
 }
 
 /* ============================================================
-   START SERVER
-   ============================================================ */
+START SERVER
+============================================================ */
 
 server.listen(PORT, () => {
   console.log(`🚀 Thousanaire server running on port ${PORT}`);
