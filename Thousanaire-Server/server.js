@@ -142,32 +142,44 @@ io.on("connection", (socket) => {
     };
 
     socket.join(roomId);
+    // Host gets roomCreated (client shows alert + hides overlay)
     socket.emit("roomCreated", { roomId });
     console.log("Room created:", roomId);
   });
 
-  /* ---------------- JOIN ROOM ---------------- */
+  /* ---------------- JOIN ROOM (code from overlay) ---------------- */
   socket.on("joinRoom", ({ roomId }) => {
-    const room = rooms[roomId];
-    if (!room) {
+    // Normalize the room code a bit to be forgiving
+    const raw = (roomId || "").trim().toUpperCase();
+    const direct = rooms[raw] ? raw : null;
+
+    if (!direct) {
       socket.emit("errorMessage", "Room not found");
+      console.log("JoinRoom failed. Requested:", roomId, "Existing:", Object.keys(rooms));
       return;
     }
 
+    const room = rooms[direct];
     const seatsTaken = Object.values(room.players).filter(p => p !== null).length;
     if (seatsTaken >= 4) {
       socket.emit("errorMessage", "Room is full");
       return;
     }
 
-    socket.join(roomId);
-    socket.emit("joinedRoom", { roomId, seat: null });
+    socket.join(direct);
+    // This is the event your original client was using for host after create,
+    // but we'll use it as the "you are in the lobby, now fill name/avatar/color"
+    socket.emit("roomJoined", { roomId: direct });
+    console.log(`Client ${socket.id} joined room lobby:`, direct);
   });
 
   /* ---------------- JOIN SEAT (ONE-TIME) ---------------- */
   socket.on("joinSeat", ({ roomId, name, avatar, color }) => {
     const room = rooms[roomId];
-    if (!room) return;
+    if (!room) {
+      socket.emit("errorMessage", "Room not found");
+      return;
+    }
 
     // Prevent same socket from joining multiple seats
     const existingSeat = Object.entries(room.players)
@@ -201,9 +213,12 @@ io.on("connection", (socket) => {
     };
 
     socket.join(roomId);
+
+    // Dedicated seat event so client can set mySeat
     socket.emit("joinedRoom", { roomId, seat });
 
     broadcastState(roomId);
+    console.log(`Player ${name} seated at ${seat} in room ${roomId}`);
   });
 
   /* ---------------- ROLL DICE ---------------- */
@@ -330,6 +345,8 @@ io.on("connection", (socket) => {
       }
 
       const active = Object.values(room.players).filter(p => p).length;
+
+      // OPTIONAL: keep rooms instead of deleting; comment out delete if you want codes to persist
       if (active === 0) {
         delete rooms[roomId];
         console.log("Room deleted:", roomId);
