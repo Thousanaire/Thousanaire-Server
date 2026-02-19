@@ -147,7 +147,7 @@ MAIN SOCKET LOGIC
 io.on("connection", (socket) => {
   console.log("Client connected:", socket.id);
 
-  /* ---------------- CREATE ROOM ---------------- */
+  /* ---------------- CREATE ROOM - FIXED HOST FLOW ---------------- */
   socket.on("createRoom", () => {
     const roomId = createRoomId();
     rooms[roomId] = {
@@ -158,6 +158,7 @@ io.on("connection", (socket) => {
     };
     socket.join(roomId);
     socket.emit("roomCreated", { roomId });
+    socket.emit("roomJoined", { roomId }); // 🎯 HOST IMMEDIATELY IN LOBBY
     console.log("🎯 Room created:", roomId, "- Host ready for SEAT 0");
   });
 
@@ -231,7 +232,8 @@ io.on("connection", (socket) => {
       color,
       chips: 3,
       eliminated: false,
-      danger: false
+      danger: false,
+      seatedTime: Date.now() // 🎯 TRACK WHEN SEATED
     };
 
     socket.join(roomId);
@@ -275,7 +277,7 @@ io.on("connection", (socket) => {
     }
 
     room.gameStarted = true;
-    broadcastState(roomId); // 🎯 FIX: Notify all clients game started!
+    broadcastState(roomId);
 
     const numDice = Math.min(player.chips, 3);
     const faces = ["Left", "Right", "Hub", "Dottt", "Wild"];
@@ -353,33 +355,46 @@ io.on("connection", (socket) => {
     }
 
     room.centerPot = 0;
-    room.currentPlayer = 0; // Reset to Host (seat 0)
+    room.currentPlayer = 0;
     room.gameStarted = false;
     broadcastState(roomId);
   });
 
-  /* ---------------- DISCONNECT - KEEP ROOMS ALIVE ---------------- */
-  socket.on("disconnect", () => {
-    console.log("Client disconnected:", socket.id);
+  /* ---------------- IMMORTAL SEATED PLAYERS - NO DISCONNECTS ---------------- */
+  socket.on("disconnect", (reason) => {
+    console.log("🔌 DISCONNECT ATTEMPT:", socket.id, reason);
+    
+    let foundSeatedPlayer = false;
 
+    // 🎯 ONLY REMOVE IF NOT SEATED > 30 SECONDS OR NOT SEATED AT ALL
     for (const roomId in rooms) {
       const room = rooms[roomId];
-
+      
       for (let seat = 0; seat < 4; seat++) {
-        const p = room.players[seat];
-        if (p && p.socketId === socket.id) {
-          console.log(`Player left seat ${seat} in ${roomId}`);
+        const player = room.players[seat];
+        if (player && player.socketId === socket.id) {
+          
+          // 🎯 IMMORTAL MODE: Seated players > 30s STAY SEATED
+          if (player.seatedTime && (Date.now() - player.seatedTime) > 30000) {
+            console.log(`🛡️ IMMORTAL "${player.name}" seat ${seat} in ${roomId} - STAYING SEATED`);
+            player.socketId = null; // Mark as disconnected but KEEP SEATED
+            foundSeatedPlayer = true;
+            break;
+          } 
+          
+          // Normal disconnect for new/unseated players
+          console.log(`👋 Player "${player.name}" left seat ${seat} in ${roomId}`);
           room.players[seat] = null;
+          broadcastState(roomId);
+          foundSeatedPlayer = true;
+          break;
         }
       }
-
-      const seatedPlayers = Object.values(room.players).filter(p => p !== null).length;
-
-      if (seatedPlayers === 0) {
-        console.log(`Room ${roomId} empty - keeping alive 5min`);
-      } else {
-        broadcastState(roomId);
-      }
+      if (foundSeatedPlayer) break;
+    }
+    
+    if (!foundSeatedPlayer) {
+      console.log("👤 Unseated client disconnected:", socket.id);
     }
   });
 });
@@ -493,7 +508,6 @@ function finalizeTurn(roomId, seat) {
     return;
   }
 
-  // 🎯 CLOCKWISE TURN ORDER: 0→1→2→3→0
   room.currentPlayer = getNextSeat(room, seat);
   console.log(`➡️ Turn → ${room.players[room.currentPlayer]?.name || 'Seat ' + room.currentPlayer} (seat ${room.currentPlayer})`);
   broadcastState(roomId);
