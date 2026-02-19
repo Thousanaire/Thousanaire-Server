@@ -16,7 +16,6 @@ const PORT = process.env.PORT || 10000;
 
 // Grace period tracking for 0-chip players
 let graceRoundPlayers = new Set();
-
 let rooms = {};
 
 function createRoomId() {
@@ -52,11 +51,11 @@ function broadcastState(roomId) {
 
   const state = {
     players: [null, null, null, null],
-    chips:   [0, 0, 0, 0],
+    chips: [0, 0, 0, 0],
     avatars: [null, null, null, null],
-    colors:  [null, null, null, null],
+    colors: [null, null, null, null],
     eliminated: [false, false, false, false],
-    danger:     [false, false, false, false],
+    danger: [false, false, false, false],
     centerPot: room.centerPot,
     currentPlayer: room.currentPlayer,
     gameStarted: room.gameStarted
@@ -65,13 +64,12 @@ function broadcastState(roomId) {
   for (let seat = 0; seat < 4; seat++) {
     const p = room.players[seat];
     if (!p) continue;
-
-    state.players[seat]    = p.name;
-    state.chips[seat]      = p.chips;
-    state.avatars[seat]    = p.avatar;
-    state.colors[seat]     = p.color;
+    state.players[seat] = p.name;
+    state.chips[seat] = p.chips;
+    state.avatars[seat] = p.avatar;
+    state.colors[seat] = p.color;
     state.eliminated[seat] = p.eliminated;
-    state.danger[seat]     = p.danger;
+    state.danger[seat] = p.danger;
   }
 
   io.to(roomId).emit("stateUpdate", state);
@@ -83,7 +81,7 @@ function handleZeroChipsOnTurn(roomId, seat) {
   if (!player) return false;
 
   const playersWithChips = countPlayersWithChips(room);
-  
+
   if (player.chips === 0) {
     if (playersWithChips <= 1) {
       // ONLY 1 player has chips → game over immediately
@@ -104,15 +102,18 @@ function handleZeroChipsOnTurn(roomId, seat) {
         // First 0-chip turn → start grace period
         player.danger = true;
         graceRoundPlayers.add(`${roomId}-${seat}`);
-        io.to(roomId).emit("graceWarning", { 
-          seat, 
-          message: `${player.name} on DANGER - 1 full round left!` 
+        io.to(roomId).emit("graceWarning", {
+          seat,
+          message: `${player.name} on DANGER - 1 full round left!`
         });
       } else {
         // Second 0-chip turn → ELIMINATED after full round
         player.eliminated = true;
         graceRoundPlayers.delete(`${roomId}-${seat}`);
-        io.to(roomId).emit("playerEliminated", { seat, name: player.name });
+        io.to(roomId).emit("playerEliminated", {
+          seat,
+          name: player.name
+        });
       }
     }
   }
@@ -132,14 +133,12 @@ io.on("connection", (socket) => {
   /* ---------------- CREATE ROOM ---------------- */
   socket.on("createRoom", () => {
     const roomId = createRoomId();
-
     rooms[roomId] = {
       players: { 0: null, 1: null, 2: null, 3: null },
       centerPot: 0,
       currentPlayer: 0,
       gameStarted: false
     };
-
     socket.join(roomId);
     socket.emit("roomCreated", { roomId });
     console.log("Room created:", roomId);
@@ -158,6 +157,7 @@ io.on("connection", (socket) => {
 
     const room = rooms[direct];
     const seatsTaken = Object.values(room.players).filter(p => p !== null).length;
+
     if (seatsTaken >= 4) {
       socket.emit("errorMessage", "Room is full");
       return;
@@ -178,6 +178,7 @@ io.on("connection", (socket) => {
 
     const existingSeat = Object.entries(room.players)
       .find(([s, p]) => p && p.socketId === socket.id);
+
     if (existingSeat) {
       socket.emit("errorMessage", "You already joined this game.");
       return;
@@ -190,6 +191,7 @@ io.on("connection", (socket) => {
         break;
       }
     }
+
     if (seat === null) {
       socket.emit("errorMessage", "Room is full");
       return;
@@ -215,7 +217,6 @@ io.on("connection", (socket) => {
   socket.on("chatMessage", ({ roomId, name, text }) => {
     const room = rooms[roomId];
     if (!room) return;
-    
     io.to(roomId).emit("chatMessage", { name, text });
     console.log(`[${roomId}] ${name}: ${text}`);
   });
@@ -242,6 +243,7 @@ io.on("connection", (socket) => {
     }
 
     room.gameStarted = true;
+    broadcastState(roomId);  // 🎯 THE FIX: Notify all clients game has started!
 
     const numDice = Math.min(player.chips, 3);
     const faces = ["Left", "Right", "Hub", "Dottt", "Wild"];
@@ -317,18 +319,17 @@ io.on("connection", (socket) => {
         room.players[i].danger = false;
       }
     }
-    
+
     // Reset grace tracking for this room
     for (let key of graceRoundPlayers) {
       if (key.startsWith(roomId + '-')) {
         graceRoundPlayers.delete(key);
       }
     }
-    
+
     room.centerPot = 0;
     room.currentPlayer = 0;
     room.gameStarted = false;
-
     broadcastState(roomId);
   });
 
@@ -338,7 +339,6 @@ io.on("connection", (socket) => {
 
     for (const roomId in rooms) {
       const room = rooms[roomId];
-
       for (let seat = 0; seat < 4; seat++) {
         const p = room.players[seat];
         if (p && p.socketId === socket.id) {
@@ -347,7 +347,6 @@ io.on("connection", (socket) => {
       }
 
       const active = Object.values(room.players).filter(p => p).length;
-
       if (active === 0) {
         // Clean up grace tracking
         for (let key of graceRoundPlayers) {
@@ -377,28 +376,27 @@ function applyOutcomes(roomId, seat, outcomes) {
       const leftSeat = getNextSeat(room, seat);
       player.chips--;
       room.players[leftSeat].chips++;
-
       io.to(roomId).emit("chipTransfer", {
         fromSeat: seat,
         toSeat: leftSeat,
         type: "left"
       });
     }
+
     if (o === "Right" && player.chips > 0) {
       const rightSeat = getNextSeat(room, seat + 2);
       player.chips--;
       room.players[rightSeat].chips++;
-
       io.to(roomId).emit("chipTransfer", {
         fromSeat: seat,
         toSeat: rightSeat,
         type: "right"
       });
     }
+
     if (o === "Hub" && player.chips > 0) {
       player.chips--;
       room.centerPot++;
-
       io.to(roomId).emit("chipTransfer", {
         fromSeat: seat,
         toSeat: null,
@@ -425,7 +423,6 @@ function applyWildActions(roomId, seat, actions) {
       if (target && target.chips > 0) {
         target.chips--;
         player.chips++;
-
         io.to(roomId).emit("chipTransfer", {
           fromSeat: a.from,
           toSeat: seat,
@@ -464,7 +461,6 @@ function applyTripleWild(roomId, seat, choice) {
         target.chips -= amount;
         player.chips += amount;
         steals -= amount;
-
         io.to(roomId).emit("chipTransfer", {
           fromSeat: i,
           toSeat: seat,
@@ -492,13 +488,11 @@ function finalizeTurn(roomId, seat) {
   if (playersWithChips === 1) {
     const winnerSeat = getLastPlayerWithChips(room);
     const winner = room.players[winnerSeat];
-
     io.to(roomId).emit("gameOver", {
       winnerSeat,
       winnerName: winner.name,
       pot: room.centerPot
     });
-
     broadcastState(roomId);
     return;
   }
