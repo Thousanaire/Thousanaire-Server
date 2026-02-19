@@ -7,24 +7,22 @@ const server = http.createServer(app);
 
 const io = new Server(server, {
   cors: {
-    origin: "*", // TODO: Replace with your domain in production
+    origin: "*", 
     methods: ["GET", "POST"]
   }
 });
 
 const PORT = process.env.PORT || 10000;
 
-// Grace period tracking for 0-chip players
 let graceRoundPlayers = new Set();
 let rooms = {};
 
-// 🚀 FIX: Auto-clean empty rooms after 5 minutes (NOT immediately)
+// Auto-clean empty rooms after 5 minutes
 setInterval(() => {
   for (const roomId in rooms) {
     const room = rooms[roomId];
     const seatedPlayers = Object.values(room.players).filter(p => p !== null).length;
     if (seatedPlayers === 0) {
-      // Cleanup grace tracking
       for (let key of graceRoundPlayers) {
         if (key.startsWith(roomId + '-')) {
           graceRoundPlayers.delete(key);
@@ -34,7 +32,7 @@ setInterval(() => {
       console.log("🧹 Auto-deleted empty room:", roomId);
     }
   }
-}, 5 * 60 * 1000); // 5 minutes
+}, 5 * 60 * 1000);
 
 function createRoomId() {
   return Math.random().toString(36).substring(2, 8).toUpperCase();
@@ -144,18 +142,18 @@ function handleZeroChipsOnTurn(roomId, seat) {
 io.on("connection", (socket) => {
   console.log("Client connected:", socket.id);
 
-  /* ---------------- CREATE ROOM ---------------- */
+  /* ---------------- CREATE ROOM - HOST = SEAT 0 ---------------- */
   socket.on("createRoom", () => {
     const roomId = createRoomId();
     rooms[roomId] = {
       players: { 0: null, 1: null, 2: null, 3: null },
       centerPot: 0,
-      currentPlayer: 0,
+      currentPlayer: 0,  // 🎯 HOST ALWAYS STARTS (SEAT 0)
       gameStarted: false
     };
     socket.join(roomId);
     socket.emit("roomCreated", { roomId });
-    console.log("Room created:", roomId);
+    console.log("🎯 Room created:", roomId, "- Host=Seat 0 ready to roll");
   });
 
   /* ---------------- JOIN ROOM ---------------- */
@@ -182,7 +180,7 @@ io.on("connection", (socket) => {
     console.log(`Client ${socket.id} joined room lobby:`, direct);
   });
 
-  /* ---------------- JOIN SEAT ---------------- */
+  /* ---------------- JOIN SEAT - HOST PROTECTION ---------------- */
   socket.on("joinSeat", ({ roomId, name, avatar, color }) => {
     const room = rooms[roomId];
     if (!room) {
@@ -190,6 +188,7 @@ io.on("connection", (socket) => {
       return;
     }
 
+    // Check if already seated
     const existingSeat = Object.entries(room.players)
       .find(([s, p]) => p && p.socketId === socket.id);
 
@@ -199,10 +198,19 @@ io.on("connection", (socket) => {
     }
 
     let seat = null;
-    for (let i = 0; i < 4; i++) {
-      if (!room.players[i]) {
-        seat = i;
-        break;
+    
+    // 🎯 HOST PROTECTION: First player in room gets SEAT 0 (Host position)
+    const seatedCount = Object.values(room.players).filter(p => p !== null).length;
+    if (seatedCount === 0 && room.players[0] === null) {
+      seat = 0;  // First player = HOST = SEAT 0
+      console.log(`🎯 HOST ${name} assigned SEAT 0 in ${roomId}`);
+    } else {
+      // Other players get seats 1,2,3
+      for (let i = 1; i < 4; i++) {
+        if (!room.players[i]) {
+          seat = i;
+          break;
+        }
       }
     }
 
@@ -224,10 +232,10 @@ io.on("connection", (socket) => {
     socket.join(roomId);
     socket.emit("joinedRoom", { roomId, seat });
     broadcastState(roomId);
-    console.log(`Player ${room.players[seat].name} seated at ${seat} in room ${roomId}`);
+    console.log(`Player ${name} (${room.players[seat].name}) seated at ${seat} in room ${roomId}`);
   });
 
-  /* 🎉 CHAT HANDLER 🎉 */
+  /* ---------------- CHAT ---------------- */
   socket.on("chatMessage", ({ roomId, name, text }) => {
     const room = rooms[roomId];
     if (!room) return;
@@ -235,7 +243,7 @@ io.on("connection", (socket) => {
     console.log(`[${roomId}] ${name}: ${text}`);
   });
 
-  /* ---------------- ROLL DICE ---------------- */
+  /* ---------------- ROLL DICE - HOST STARTS GAME ---------------- */
   socket.on("rollDice", ({ roomId }) => {
     const room = rooms[roomId];
     if (!room) return;
@@ -245,10 +253,15 @@ io.on("connection", (socket) => {
     if (!seatEntry) return;
 
     const playerSeat = parseInt(seatEntry[0]);
-    if (playerSeat !== room.currentPlayer) return;
+    if (playerSeat !== room.currentPlayer) {
+      console.log(`❌ ${room.players[playerSeat]?.name} tried to roll but not their turn (current: ${room.currentPlayer})`);
+      return;
+    }
 
     const player = room.players[playerSeat];
     if (player.eliminated) return;
+
+    console.log(`🎲 ${player.name} (seat ${playerSeat}) ROLLING...`);
 
     // Handle 0 chips BEFORE rolling
     if (player.chips === 0) {
@@ -257,7 +270,7 @@ io.on("connection", (socket) => {
     }
 
     room.gameStarted = true;
-    broadcastState(roomId);  // 🎯 FIX #1: Notify all clients game started!
+    broadcastState(roomId);  // 🎯 FIX: Tell everyone game started!
 
     const numDice = Math.min(player.chips, 3);
     const faces = ["Left", "Right", "Hub", "Dottt", "Wild"];
@@ -266,6 +279,8 @@ io.on("connection", (socket) => {
     for (let i = 0; i < numDice; i++) {
       outcomes.push(faces[Math.floor(Math.random() * faces.length)]);
     }
+
+    console.log(`🎲 Roll results: ${outcomes.join(", ")}`);
 
     io.to(roomId).emit("rollResult", {
       seat: playerSeat,
@@ -276,26 +291,19 @@ io.on("connection", (socket) => {
     const wildCount = outcomes.filter(o => o === "Wild").length;
 
     if (wildCount === 3) {
-      io.to(player.socketId).emit("requestTripleWildChoice", {
-        roomId,
-        seat: playerSeat
-      });
+      io.to(player.socketId).emit("requestTripleWildChoice", { roomId, seat: playerSeat });
       return;
     }
 
     if (wildCount > 0) {
-      io.to(player.socketId).emit("requestWildChoice", {
-        roomId,
-        seat: playerSeat,
-        outcomes
-      });
+      io.to(player.socketId).emit("requestWildChoice", { roomId, seat: playerSeat, outcomes });
       return;
     }
 
     applyOutcomes(roomId, playerSeat, outcomes);
   });
 
-  /* ---------------- RESOLVE NORMAL WILDS ---------------- */
+  /* ---------------- RESOLVE WILDS ---------------- */
   socket.on("resolveWilds", ({ roomId, actions }) => {
     const room = rooms[roomId];
     if (!room) return;
@@ -308,7 +316,6 @@ io.on("connection", (socket) => {
     applyWildActions(roomId, playerSeat, actions);
   });
 
-  /* ---------------- TRIPLE WILD CHOICE ---------------- */
   socket.on("tripleWildChoice", ({ roomId, choice }) => {
     const room = rooms[roomId];
     if (!room) return;
@@ -341,19 +348,18 @@ io.on("connection", (socket) => {
     }
 
     room.centerPot = 0;
-    room.currentPlayer = 0;
+    room.currentPlayer = 0;  // Reset to Host
     room.gameStarted = false;
     broadcastState(roomId);
   });
 
-  /* ---------------- DISCONNECT - 🎯 FIX #2: DON'T DELETE EMPTY ROOMS IMMEDIATELY ---------------- */
+  /* ---------------- DISCONNECT - KEEP ROOMS ALIVE ---------------- */
   socket.on("disconnect", () => {
     console.log("Client disconnected:", socket.id);
 
     for (const roomId in rooms) {
       const room = rooms[roomId];
       
-      // Clear the seat if player was seated
       for (let seat = 0; seat < 4; seat++) {
         const p = room.players[seat];
         if (p && p.socketId === socket.id) {
@@ -365,8 +371,7 @@ io.on("connection", (socket) => {
       const seatedPlayers = Object.values(room.players).filter(p => p !== null).length;
       
       if (seatedPlayers === 0) {
-        // 🚀 KEEP ROOM ALIVE for late joiners - auto-clean later
-        console.log(`Room ${roomId} empty - keeping alive 5min for late joiners`);
+        console.log(`Room ${roomId} empty - keeping alive 5min`);
       } else {
         broadcastState(roomId);
       }
@@ -375,7 +380,7 @@ io.on("connection", (socket) => {
 });
 
 /* ============================================================
-   GAME LOGIC FUNCTIONS
+   GAME LOGIC - CLOCKWISE TURN ORDER
    ============================================================ */
 
 function applyOutcomes(roomId, seat, outcomes) {
@@ -387,32 +392,20 @@ function applyOutcomes(roomId, seat, outcomes) {
       const leftSeat = getNextSeat(room, seat);
       player.chips--;
       room.players[leftSeat].chips++;
-      io.to(roomId).emit("chipTransfer", {
-        fromSeat: seat,
-        toSeat: leftSeat,
-        type: "left"
-      });
+      io.to(roomId).emit("chipTransfer", { fromSeat: seat, toSeat: leftSeat, type: "left" });
     }
 
     if (o === "Right" && player.chips > 0) {
       const rightSeat = getNextSeat(room, seat + 2);
       player.chips--;
       room.players[rightSeat].chips++;
-      io.to(roomId).emit("chipTransfer", {
-        fromSeat: seat,
-        toSeat: rightSeat,
-        type: "right"
-      });
+      io.to(roomId).emit("chipTransfer", { fromSeat: seat, toSeat: rightSeat, type: "right" });
     }
 
     if (o === "Hub" && player.chips > 0) {
       player.chips--;
       room.centerPot++;
-      io.to(roomId).emit("chipTransfer", {
-        fromSeat: seat,
-        toSeat: null,
-        type: "hub"
-      });
+      io.to(roomId).emit("chipTransfer", { fromSeat: seat, toSeat: null, type: "hub" });
     }
   });
 
@@ -434,11 +427,7 @@ function applyWildActions(roomId, seat, actions) {
       if (target && target.chips > 0) {
         target.chips--;
         player.chips++;
-        io.to(roomId).emit("chipTransfer", {
-          fromSeat: a.from,
-          toSeat: seat,
-          type: "steal"
-        });
+        io.to(roomId).emit("chipTransfer", { fromSeat: a.from, toSeat: seat, type: "steal" });
       }
     }
   });
@@ -453,11 +442,7 @@ function applyTripleWild(roomId, seat, choice) {
   if (choice.type === "takePot") {
     if (room.centerPot > 0) {
       player.chips += room.centerPot;
-      io.to(roomId).emit("chipTransfer", {
-        fromSeat: null,
-        toSeat: seat,
-        type: "takePot"
-      });
+      io.to(roomId).emit("chipTransfer", { fromSeat: null, toSeat: seat, type: "takePot" });
     }
     room.centerPot = 0;
   }
@@ -472,11 +457,7 @@ function applyTripleWild(roomId, seat, choice) {
         target.chips -= amount;
         player.chips += amount;
         steals -= amount;
-        io.to(roomId).emit("chipTransfer", {
-          fromSeat: i,
-          toSeat: seat,
-          type: "steal3"
-        });
+        io.to(roomId).emit("chipTransfer", { fromSeat: i, toSeat: seat, type: "steal3" });
       }
     }
   }
@@ -507,7 +488,9 @@ function finalizeTurn(roomId, seat) {
     return;
   }
 
+  // 🎯 CLOCKWISE: 0→1→2→3→0
   room.currentPlayer = getNextSeat(room, seat);
+  console.log(`Turn → Player ${room.players[room.currentPlayer]?.name || room.currentPlayer} (seat ${room.currentPlayer})`);
   broadcastState(roomId);
 }
 
