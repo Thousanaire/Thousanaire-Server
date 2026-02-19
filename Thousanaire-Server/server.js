@@ -18,6 +18,24 @@ const PORT = process.env.PORT || 10000;
 let graceRoundPlayers = new Set();
 let rooms = {};
 
+// 🚀 FIX: Auto-clean empty rooms after 5 minutes (NOT immediately)
+setInterval(() => {
+  for (const roomId in rooms) {
+    const room = rooms[roomId];
+    const seatedPlayers = Object.values(room.players).filter(p => p !== null).length;
+    if (seatedPlayers === 0) {
+      // Cleanup grace tracking
+      for (let key of graceRoundPlayers) {
+        if (key.startsWith(roomId + '-')) {
+          graceRoundPlayers.delete(key);
+        }
+      }
+      delete rooms[roomId];
+      console.log("🧹 Auto-deleted empty room:", roomId);
+    }
+  }
+}, 5 * 60 * 1000); // 5 minutes
+
 function createRoomId() {
   return Math.random().toString(36).substring(2, 8).toUpperCase();
 }
@@ -84,7 +102,6 @@ function handleZeroChipsOnTurn(roomId, seat) {
 
   if (player.chips === 0) {
     if (playersWithChips <= 1) {
-      // ONLY 1 player has chips → game over immediately
       if (playersWithChips === 1) {
         const winnerSeat = getLastPlayerWithChips(room);
         const winner = room.players[winnerSeat];
@@ -97,9 +114,7 @@ function handleZeroChipsOnTurn(roomId, seat) {
         return true;
       }
     } else {
-      // 2+ players have chips → grace round logic
       if (!graceRoundPlayers.has(`${roomId}-${seat}`)) {
-        // First 0-chip turn → start grace period
         player.danger = true;
         graceRoundPlayers.add(`${roomId}-${seat}`);
         io.to(roomId).emit("graceWarning", {
@@ -107,7 +122,6 @@ function handleZeroChipsOnTurn(roomId, seat) {
           message: `${player.name} on DANGER - 1 full round left!`
         });
       } else {
-        // Second 0-chip turn → ELIMINATED after full round
         player.eliminated = true;
         graceRoundPlayers.delete(`${roomId}-${seat}`);
         io.to(roomId).emit("playerEliminated", {
@@ -199,7 +213,7 @@ io.on("connection", (socket) => {
 
     room.players[seat] = {
       socketId: socket.id,
-      name: name.substring(0, 12), // Limit name length
+      name: name.substring(0, 12),
       avatar,
       color,
       chips: 3,
@@ -213,7 +227,7 @@ io.on("connection", (socket) => {
     console.log(`Player ${room.players[seat].name} seated at ${seat} in room ${roomId}`);
   });
 
-  /* 🎉 NEW CHAT HANDLER 🎉 */
+  /* 🎉 CHAT HANDLER 🎉 */
   socket.on("chatMessage", ({ roomId, name, text }) => {
     const room = rooms[roomId];
     if (!room) return;
@@ -243,7 +257,7 @@ io.on("connection", (socket) => {
     }
 
     room.gameStarted = true;
-    broadcastState(roomId);  // 🎯 THE FIX: Notify all clients game has started!
+    broadcastState(roomId);  // 🎯 FIX #1: Notify all clients game started!
 
     const numDice = Math.min(player.chips, 3);
     const faces = ["Left", "Right", "Hub", "Dottt", "Wild"];
@@ -320,7 +334,6 @@ io.on("connection", (socket) => {
       }
     }
 
-    // Reset grace tracking for this room
     for (let key of graceRoundPlayers) {
       if (key.startsWith(roomId + '-')) {
         graceRoundPlayers.delete(key);
@@ -333,29 +346,27 @@ io.on("connection", (socket) => {
     broadcastState(roomId);
   });
 
-  /* ---------------- DISCONNECT ---------------- */
+  /* ---------------- DISCONNECT - 🎯 FIX #2: DON'T DELETE EMPTY ROOMS IMMEDIATELY ---------------- */
   socket.on("disconnect", () => {
     console.log("Client disconnected:", socket.id);
 
     for (const roomId in rooms) {
       const room = rooms[roomId];
+      
+      // Clear the seat if player was seated
       for (let seat = 0; seat < 4; seat++) {
         const p = room.players[seat];
         if (p && p.socketId === socket.id) {
+          console.log(`Player left seat ${seat} in ${roomId}`);
           room.players[seat] = null;
         }
       }
 
-      const active = Object.values(room.players).filter(p => p).length;
-      if (active === 0) {
-        // Clean up grace tracking
-        for (let key of graceRoundPlayers) {
-          if (key.startsWith(roomId + '-')) {
-            graceRoundPlayers.delete(key);
-          }
-        }
-        delete rooms[roomId];
-        console.log("Room deleted:", roomId);
+      const seatedPlayers = Object.values(room.players).filter(p => p !== null).length;
+      
+      if (seatedPlayers === 0) {
+        // 🚀 KEEP ROOM ALIVE for late joiners - auto-clean later
+        console.log(`Room ${roomId} empty - keeping alive 5min for late joiners`);
       } else {
         broadcastState(roomId);
       }
@@ -479,7 +490,6 @@ function finalizeTurn(roomId, seat) {
   const playersWithChips = countPlayersWithChips(room);
 
   if (player.chips > 0) {
-    // Player recovered chips → clear grace period
     player.danger = false;
     const graceKey = `${roomId}-${seat}`;
     graceRoundPlayers.delete(graceKey);
