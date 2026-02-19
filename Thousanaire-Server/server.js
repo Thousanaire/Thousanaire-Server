@@ -142,18 +142,18 @@ function handleZeroChipsOnTurn(roomId, seat) {
 io.on("connection", (socket) => {
   console.log("Client connected:", socket.id);
 
-  /* ---------------- CREATE ROOM - HOST = SEAT 0 ---------------- */
+  /* ---------------- CREATE ROOM ---------------- */
   socket.on("createRoom", () => {
     const roomId = createRoomId();
     rooms[roomId] = {
       players: { 0: null, 1: null, 2: null, 3: null },
       centerPot: 0,
-      currentPlayer: 0,  // 🎯 HOST ALWAYS STARTS (SEAT 0)
+      currentPlayer: 0,  // 🎯 HOST ALWAYS STARTS AT SEAT 0
       gameStarted: false
     };
     socket.join(roomId);
     socket.emit("roomCreated", { roomId });
-    console.log("🎯 Room created:", roomId, "- Host=Seat 0 ready to roll");
+    console.log("🎯 Room created:", roomId, "- Host ready for SEAT 0");
   });
 
   /* ---------------- JOIN ROOM ---------------- */
@@ -180,7 +180,7 @@ io.on("connection", (socket) => {
     console.log(`Client ${socket.id} joined room lobby:`, direct);
   });
 
-  /* ---------------- JOIN SEAT - HOST PROTECTION ---------------- */
+  /* ---------------- JOIN SEAT - 🎯 GUARANTEE HOST SEAT 0 ---------------- */
   socket.on("joinSeat", ({ roomId, name, avatar, color }) => {
     const room = rooms[roomId];
     if (!room) {
@@ -191,21 +191,21 @@ io.on("connection", (socket) => {
     // Check if already seated
     const existingSeat = Object.entries(room.players)
       .find(([s, p]) => p && p.socketId === socket.id);
-
     if (existingSeat) {
       socket.emit("errorMessage", "You already joined this game.");
       return;
     }
 
     let seat = null;
-    
-    // 🎯 HOST PROTECTION: First player in room gets SEAT 0 (Host position)
     const seatedCount = Object.values(room.players).filter(p => p !== null).length;
-    if (seatedCount === 0 && room.players[0] === null) {
-      seat = 0;  // First player = HOST = SEAT 0
-      console.log(`🎯 HOST ${name} assigned SEAT 0 in ${roomId}`);
-    } else {
-      // Other players get seats 1,2,3
+    
+    // 🎯 RULE 1: FIRST PLAYER = HOST = SEAT 0 ALWAYS
+    if (seatedCount === 0) {
+      seat = 0;
+      console.log(`🎯 HOST "${name}" AUTO-ASSIGNED SEAT 0 in ${roomId}`);
+    } 
+    // 🎯 RULE 2: Others fill seats 1,2,3
+    else {
       for (let i = 1; i < 4; i++) {
         if (!room.players[i]) {
           seat = i;
@@ -232,7 +232,7 @@ io.on("connection", (socket) => {
     socket.join(roomId);
     socket.emit("joinedRoom", { roomId, seat });
     broadcastState(roomId);
-    console.log(`Player ${name} (${room.players[seat].name}) seated at ${seat} in room ${roomId}`);
+    console.log(`✅ Player "${name}" (${room.players[seat].name}) seated at ${seat} (${seatedCount + 1}/4) in ${roomId}`);
   });
 
   /* ---------------- CHAT ---------------- */
@@ -243,7 +243,7 @@ io.on("connection", (socket) => {
     console.log(`[${roomId}] ${name}: ${text}`);
   });
 
-  /* ---------------- ROLL DICE - HOST STARTS GAME ---------------- */
+  /* ---------------- ROLL DICE ---------------- */
   socket.on("rollDice", ({ roomId }) => {
     const room = rooms[roomId];
     if (!room) return;
@@ -270,7 +270,7 @@ io.on("connection", (socket) => {
     }
 
     room.gameStarted = true;
-    broadcastState(roomId);  // 🎯 FIX: Tell everyone game started!
+    broadcastState(roomId);  // 🎯 FIX: Notify all clients game started!
 
     const numDice = Math.min(player.chips, 3);
     const faces = ["Left", "Right", "Hub", "Dottt", "Wild"];
@@ -280,7 +280,7 @@ io.on("connection", (socket) => {
       outcomes.push(faces[Math.floor(Math.random() * faces.length)]);
     }
 
-    console.log(`🎲 Roll results: ${outcomes.join(", ")}`);
+    console.log(`🎲 Roll results for ${player.name}: ${outcomes.join(", ")}`);
 
     io.to(roomId).emit("rollResult", {
       seat: playerSeat,
@@ -348,7 +348,7 @@ io.on("connection", (socket) => {
     }
 
     room.centerPot = 0;
-    room.currentPlayer = 0;  // Reset to Host
+    room.currentPlayer = 0;  // Reset to Host (seat 0)
     room.gameStarted = false;
     broadcastState(roomId);
   });
@@ -380,7 +380,7 @@ io.on("connection", (socket) => {
 });
 
 /* ============================================================
-   GAME LOGIC - CLOCKWISE TURN ORDER
+   GAME LOGIC FUNCTIONS
    ============================================================ */
 
 function applyOutcomes(roomId, seat, outcomes) {
@@ -488,9 +488,9 @@ function finalizeTurn(roomId, seat) {
     return;
   }
 
-  // 🎯 CLOCKWISE: 0→1→2→3→0
+  // 🎯 CLOCKWISE TURN ORDER: 0→1→2→3→0
   room.currentPlayer = getNextSeat(room, seat);
-  console.log(`Turn → Player ${room.players[room.currentPlayer]?.name || room.currentPlayer} (seat ${room.currentPlayer})`);
+  console.log(`➡️ Turn → ${room.players[room.currentPlayer]?.name || 'Seat ' + room.currentPlayer} (seat ${room.currentPlayer})`);
   broadcastState(roomId);
 }
 
