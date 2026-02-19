@@ -7,28 +7,15 @@ const server = http.createServer(app);
 
 const io = new Server(server, {
   cors: {
-    origin: "*",
+    origin: "*", // TODO: Replace with your domain in production
     methods: ["GET", "POST"]
   }
 });
 
 const PORT = process.env.PORT || 10000;
 
-/*
-rooms = {
-  ROOMID: {
-    players: {
-      0: { socketId, name, avatar, color, chips, eliminated, danger },
-      1: { ... },
-      2: { ... },
-      3: { ... }
-    },
-    centerPot: 0,
-    currentPlayer: 0,
-    gameStarted: false
-  }
-}
-*/
+// Grace period tracking for 0-chip players
+let graceRoundPlayers = new Set();
 
 let rooms = {};
 
@@ -93,29 +80,41 @@ function broadcastState(roomId) {
 function handleZeroChipsOnTurn(roomId, seat) {
   const room = rooms[roomId];
   const player = room.players[seat];
-  if (!player) return;
+  if (!player) return false;
 
+  const playersWithChips = countPlayersWithChips(room);
+  
   if (player.chips === 0) {
-    if (player.danger) {
-      player.eliminated = true;
+    if (playersWithChips <= 1) {
+      // ONLY 1 player has chips → game over immediately
+      if (playersWithChips === 1) {
+        const winnerSeat = getLastPlayerWithChips(room);
+        const winner = room.players[winnerSeat];
+        io.to(roomId).emit("gameOver", {
+          winnerSeat,
+          winnerName: winner.name,
+          pot: room.centerPot
+        });
+        broadcastState(roomId);
+        return true;
+      }
     } else {
-      player.danger = true;
+      // 2+ players have chips → grace round logic
+      if (!graceRoundPlayers.has(`${roomId}-${seat}`)) {
+        // First 0-chip turn → start grace period
+        player.danger = true;
+        graceRoundPlayers.add(`${roomId}-${seat}`);
+        io.to(roomId).emit("graceWarning", { 
+          seat, 
+          message: `${player.name} on DANGER - 1 full round left!` 
+        });
+      } else {
+        // Second 0-chip turn → ELIMINATED after full round
+        player.eliminated = true;
+        graceRoundPlayers.delete(`${roomId}-${seat}`);
+        io.to(roomId).emit("playerEliminated", { seat, name: player.name });
+      }
     }
-  }
-
-  const count = countPlayersWithChips(room);
-  if (count === 1) {
-    const winnerSeat = getLastPlayerWithChips(room);
-    const winner = room.players[winnerSeat];
-
-    io.to(roomId).emit("gameOver", {
-      winnerSeat,
-      winnerName: winner.name,
-      pot: room.centerPot
-    });
-
-    broadcastState(roomId);
-    return true;
   }
 
   room.currentPlayer = getNextSeat(room, seat);
@@ -142,20 +141,18 @@ io.on("connection", (socket) => {
     };
 
     socket.join(roomId);
-    // Host gets roomCreated (client shows alert + hides overlay)
     socket.emit("roomCreated", { roomId });
     console.log("Room created:", roomId);
   });
 
-  /* ---------------- JOIN ROOM (code from overlay) ---------------- */
+  /* ---------------- JOIN ROOM ---------------- */
   socket.on("joinRoom", ({ roomId }) => {
-    // Normalize the room code a bit to be forgiving
     const raw = (roomId || "").trim().toUpperCase();
     const direct = rooms[raw] ? raw : null;
 
     if (!direct) {
       socket.emit("errorMessage", "Room not found");
-      console.log("JoinRoom failed. Requested:", roomId, "Existing:", Object.keys(rooms));
+      console.log("JoinRoom failed. Requested:", roomId);
       return;
     }
 
@@ -167,13 +164,11 @@ io.on("connection", (socket) => {
     }
 
     socket.join(direct);
-    // This is the event your original client was using for host after create,
-    // but we'll use it as the "you are in the lobby, now fill name/avatar/color"
     socket.emit("roomJoined", { roomId: direct });
     console.log(`Client ${socket.id} joined room lobby:`, direct);
   });
 
-  /* ---------------- JOIN SEAT (ONE-TIME) ---------------- */
+  /* ---------------- JOIN SEAT ---------------- */
   socket.on("joinSeat", ({ roomId, name, avatar, color }) => {
     const room = rooms[roomId];
     if (!room) {
@@ -181,7 +176,6 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // Prevent same socket from joining multiple seats
     const existingSeat = Object.entries(room.players)
       .find(([s, p]) => p && p.socketId === socket.id);
     if (existingSeat) {
@@ -189,7 +183,6 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // First player (host) gets seat 0 (top), others clockwise 1,2,3
     let seat = null;
     for (let i = 0; i < 4; i++) {
       if (!room.players[i]) {
@@ -204,7 +197,7 @@ io.on("connection", (socket) => {
 
     room.players[seat] = {
       socketId: socket.id,
-      name,
+      name: name.substring(0, 12), // Limit name length
       avatar,
       color,
       chips: 3,
@@ -213,12 +206,9 @@ io.on("connection", (socket) => {
     };
 
     socket.join(roomId);
-
-    // Dedicated seat event so client can set mySeat
     socket.emit("joinedRoom", { roomId, seat });
-
     broadcastState(roomId);
-    console.log(`Player ${name} seated at ${seat} in room ${roomId}`);
+    console.log(`Player ${room.players[seat].name} seated at ${seat} in room ${roomId}`);
   });
 
   /* ---------------- ROLL DICE ---------------- */
@@ -236,13 +226,10 @@ io.on("connection", (socket) => {
     const player = room.players[playerSeat];
     if (player.eliminated) return;
 
-    // If player has 0 chips at start of turn, handle danger/elimination
+    // Handle 0 chips BEFORE rolling
     if (player.chips === 0) {
       const ended = handleZeroChipsOnTurn(roomId, playerSeat);
-      if (!ended) {
-        // Turn passed; no roll
-      }
-      return;
+      if (ended) return;
     }
 
     room.gameStarted = true;
@@ -255,7 +242,6 @@ io.on("connection", (socket) => {
       outcomes.push(faces[Math.floor(Math.random() * faces.length)]);
     }
 
-    // Tell clients to animate dice + history
     io.to(roomId).emit("rollResult", {
       seat: playerSeat,
       outcomes,
@@ -322,7 +308,14 @@ io.on("connection", (socket) => {
         room.players[i].danger = false;
       }
     }
-
+    
+    // Reset grace tracking for this room
+    for (let key of graceRoundPlayers) {
+      if (key.startsWith(roomId + '-')) {
+        graceRoundPlayers.delete(key);
+      }
+    }
+    
     room.centerPot = 0;
     room.currentPlayer = 0;
     room.gameStarted = false;
@@ -346,8 +339,13 @@ io.on("connection", (socket) => {
 
       const active = Object.values(room.players).filter(p => p).length;
 
-      // OPTIONAL: keep rooms instead of deleting; comment out delete if you want codes to persist
       if (active === 0) {
+        // Clean up grace tracking
+        for (let key of graceRoundPlayers) {
+          if (key.startsWith(roomId + '-')) {
+            graceRoundPlayers.delete(key);
+          }
+        }
         delete rooms[roomId];
         console.log("Room deleted:", roomId);
       } else {
@@ -378,7 +376,7 @@ function applyOutcomes(roomId, seat, outcomes) {
       });
     }
     if (o === "Right" && player.chips > 0) {
-      const rightSeat = getNextSeat(room, seat - 2);
+      const rightSeat = getNextSeat(room, seat + 2);
       player.chips--;
       room.players[rightSeat].chips++;
 
@@ -413,9 +411,6 @@ function applyWildActions(roomId, seat, actions) {
   const player = room.players[seat];
 
   actions.forEach(a => {
-    if (a.type === "cancel") {
-      // Cancel is implicit: we just don't apply that outcome
-    }
     if (a.type === "steal") {
       const target = room.players[a.from];
       if (target && target.chips > 0) {
@@ -441,7 +436,6 @@ function applyTripleWild(roomId, seat, choice) {
   if (choice.type === "takePot") {
     if (room.centerPot > 0) {
       player.chips += room.centerPot;
-
       io.to(roomId).emit("chipTransfer", {
         fromSeat: null,
         toSeat: seat,
@@ -477,19 +471,16 @@ function applyTripleWild(roomId, seat, choice) {
 function finalizeTurn(roomId, seat) {
   const room = rooms[roomId];
   const player = room.players[seat];
+  const playersWithChips = countPlayersWithChips(room);
 
-  if (player.chips === 0) {
-    if (player.danger) {
-      player.eliminated = true;
-    } else {
-      player.danger = true;
-    }
-  } else {
+  if (player.chips > 0) {
+    // Player recovered chips → clear grace period
     player.danger = false;
+    const graceKey = `${roomId}-${seat}`;
+    graceRoundPlayers.delete(graceKey);
   }
 
-  const count = countPlayersWithChips(room);
-  if (count === 1) {
+  if (playersWithChips === 1) {
     const winnerSeat = getLastPlayerWithChips(room);
     const winner = room.players[winnerSeat];
 
@@ -512,5 +503,6 @@ function finalizeTurn(roomId, seat) {
    ============================================================ */
 
 server.listen(PORT, () => {
-  console.log(`Authoritative game server running on port ${PORT}`);
+  console.log(`🚀 Thousanaire server running on port ${PORT}`);
+  console.log(`📱 Test at: http://localhost:${PORT}`);
 });
