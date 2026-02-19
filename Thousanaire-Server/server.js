@@ -211,6 +211,15 @@ io.on("connection", (socket) => {
     console.log(`Player ${room.players[seat].name} seated at ${seat} in room ${roomId}`);
   });
 
+  /* 🎉 NEW CHAT HANDLER 🎉 */
+  socket.on("chatMessage", ({ roomId, name, text }) => {
+    const room = rooms[roomId];
+    if (!room) return;
+    
+    io.to(roomId).emit("chatMessage", { name, text });
+    console.log(`[${roomId}] ${name}: ${text}`);
+  });
+
   /* ---------------- ROLL DICE ---------------- */
   socket.on("rollDice", ({ roomId }) => {
     const room = rooms[roomId];
