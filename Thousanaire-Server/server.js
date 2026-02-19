@@ -186,7 +186,7 @@ io.on("connection", (socket) => {
     console.log(`Client ${socket.id} joined room lobby:`, direct);
   });
 
-  /* ---------------- JOIN SEAT - 🎯 GUARANTEE HOST SEAT 0 ---------------- */
+  /* ---------------- JOIN SEAT - 🎯 START GAME WHEN FULL ---------------- */
   socket.on("joinSeat", ({ roomId, name, avatar, color }) => {
     const room = rooms[roomId];
     if (!room) {
@@ -236,10 +236,17 @@ io.on("connection", (socket) => {
       seatedTime: Date.now() // 🎯 TRACK WHEN SEATED
     };
 
+    // 🎯 CRITICAL FIX: START GAME WHEN 4 PLAYERS SEATED!
+    const newSeatedCount = Object.values(room.players).filter(p => p !== null).length;
+    if (newSeatedCount === 4) {
+      room.gameStarted = true;
+      console.log(`🚀 GAME STARTED in ${roomId}! ${room.players[0].name} (seat 0) rolls first! 🎲`);
+    }
+
     socket.join(roomId);
     socket.emit("joinedRoom", { roomId, seat });
     broadcastState(roomId);
-    console.log(`✅ Player "${name}" (${room.players[seat].name}) seated at ${seat} (${seatedCount + 1}/4) in ${roomId}`);
+    console.log(`✅ Player "${name}" (${room.players[seat].name}) seated at ${seat} (${newSeatedCount}/4) in ${roomId}`);
   });
 
   /* ---------------- CHAT ---------------- */
@@ -276,8 +283,9 @@ io.on("connection", (socket) => {
       if (ended) return;
     }
 
+    // 🎯 ENSURE gameStarted is true (backup from joinSeat fix)
     room.gameStarted = true;
-    broadcastState(roomId);
+    broadcastState(roomId); // Sends gameStarted: true + current state
 
     const numDice = Math.min(player.chips, 3);
     const faces = ["Left", "Right", "Hub", "Dottt", "Wild"];
