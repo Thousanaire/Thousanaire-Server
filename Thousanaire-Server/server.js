@@ -94,6 +94,7 @@ function broadcastState(roomId) {
     state.danger[seat] = p.danger;
   }
 
+  console.log(`📡 Broadcasting to ${roomId}: currentPlayer=${room.currentPlayer}, chips=[${state.chips.join(',')}]`);
   io.to(roomId).emit("stateUpdate", state);
 }
 
@@ -114,7 +115,6 @@ function handleZeroChipsOnTurn(roomId, seat) {
           winnerName: winner.name,
           pot: room.centerPot
         });
-        // winner will take pot in finalizeTurn logic if needed
         broadcastState(roomId);
         return true;
       }
@@ -155,12 +155,12 @@ io.on("connection", (socket) => {
     rooms[roomId] = {
       players: { 0: null, 1: null, 2: null, 3: null },
       centerPot: 0,
-      currentPlayer: 0, // 🎯 HOST ALWAYS STARTS AT SEAT 0
+      currentPlayer: 0,
       gameStarted: false
     };
     socket.join(roomId);
     socket.emit("roomCreated", { roomId });
-    socket.emit("roomJoined", { roomId }); // 🎯 HOST IMMEDIATELY IN LOBBY
+    socket.emit("roomJoined", { roomId });
     console.log("🎯 Room created:", roomId, "- Host ready for SEAT 0");
   });
 
@@ -196,7 +196,6 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // Check if already seated
     const existingSeat = Object.entries(room.players)
       .find(([s, p]) => p && p.socketId === socket.id);
     if (existingSeat) {
@@ -207,13 +206,10 @@ io.on("connection", (socket) => {
     let seat = null;
     const seatedCount = Object.values(room.players).filter(p => p !== null).length;
 
-    // 🎯 RULE 1: FIRST PLAYER = HOST = SEAT 0 ALWAYS
     if (seatedCount === 0) {
       seat = 0;
       console.log(`🎯 HOST "${name}" AUTO-ASSIGNED SEAT 0 in ${roomId}`);
-    }
-    // 🎯 RULE 2: Others fill seats 1,2,3
-    else {
+    } else {
       for (let i = 1; i < 4; i++) {
         if (!room.players[i]) {
           seat = i;
@@ -235,10 +231,9 @@ io.on("connection", (socket) => {
       chips: 3,
       eliminated: false,
       danger: false,
-      seatedTime: Date.now() // 🎯 TRACK WHEN SEATED
+      seatedTime: Date.now()
     };
 
-    // 🎯 CRITICAL FIX: START GAME WHEN 4 PLAYERS SEATED!
     const newSeatedCount = Object.values(room.players).filter(p => p !== null).length;
     if (newSeatedCount === 4) {
       room.gameStarted = true;
@@ -279,15 +274,13 @@ io.on("connection", (socket) => {
 
     console.log(`🎲 ${player.name} (seat ${playerSeat}) ROLLING...`);
 
-    // Handle 0 chips BEFORE rolling
     if (player.chips === 0) {
       const ended = handleZeroChipsOnTurn(roomId, playerSeat);
       if (ended) return;
     }
 
-    // 🎯 ENSURE gameStarted is true (backup from joinSeat fix)
     room.gameStarted = true;
-    broadcastState(roomId); // Sends gameStarted: true + current state
+    broadcastState(roomId);
 
     const numDice = Math.min(player.chips, 3);
     const faces = ["Left", "Right", "Hub", "Dottt", "Wild"];
@@ -313,15 +306,19 @@ io.on("connection", (socket) => {
     }
 
     if (wildCount > 0) {
-      io.to(player.socketId).emit("requestWildChoice", { roomId, seat: playerSeat, outcomes });
+      io.to(player.socketId).emit("requestWildChoice", { 
+        roomId, 
+        seat: playerSeat, 
+        outcomes 
+      });
       return;
     }
 
     applyOutcomes(roomId, playerSeat, outcomes);
   });
 
-  /* ---------------- RESOLVE WILDS ---------------- */
-  socket.on("resolveWilds", ({ roomId, actions }) => {
+  /* ---------------- RESOLVE WILDS (TIGHTENED LOGIC) ---------------- */
+  socket.on("resolveWilds", ({ roomId, outcomes, cancels, steals }) => {
     const room = rooms[roomId];
     if (!room) return;
 
@@ -330,7 +327,7 @@ io.on("connection", (socket) => {
     if (!seatEntry) return;
 
     const playerSeat = parseInt(seatEntry[0]);
-    applyWildActions(roomId, playerSeat, actions);
+    applyWildActions(roomId, playerSeat, outcomes, cancels, steals);
   });
 
   socket.on("tripleWildChoice", ({ roomId, choice }) => {
@@ -376,7 +373,6 @@ io.on("connection", (socket) => {
     
     let foundSeatedPlayer = false;
 
-    // 🎯 ONLY REMOVE IF NOT SEATED > 30 SECONDS OR NOT SEATED AT ALL
     for (const roomId in rooms) {
       const room = rooms[roomId];
       
@@ -384,15 +380,13 @@ io.on("connection", (socket) => {
         const player = room.players[seat];
         if (player && player.socketId === socket.id) {
           
-          // 🎯 IMMORTAL MODE: Seated players > 30s STAY SEATED
           if (player.seatedTime && (Date.now() - player.seatedTime) > 30000) {
             console.log(`🛡️ IMMORTAL "${player.name}" seat ${seat} in ${roomId} - STAYING SEATED`);
-            player.socketId = null; // Mark as disconnected but KEEP SEATED
+            player.socketId = null;
             foundSeatedPlayer = true;
             break;
           } 
           
-          // Normal disconnect for new/unseated players
           console.log(`👋 Player "${player.name}" left seat ${seat} in ${roomId}`);
           room.players[seat] = null;
           broadcastState(roomId);
@@ -447,19 +441,63 @@ function applyOutcomes(roomId, seat, outcomes) {
   finalizeTurn(roomId, seat);
 }
 
-function applyWildActions(roomId, seat, actions) {
+/* 🔥 TIGHTENED WILD LOGIC - Mirrors your old applyWildAndOutcomes */
+function applyWildActions(roomId, seat, outcomes, cancels = [], steals = []) {
   const room = rooms[roomId];
   const player = room.players[seat];
+  const canceledIndices = new Set(cancels || []);
 
-  actions.forEach(a => {
-    if (a.type === "steal") {
-      const target = room.players[a.from];
-      if (target && target.chips > 0) {
-        target.chips--;
-        player.chips++;
-        io.to(roomId).emit("chipTransfer", { fromSeat: a.from, toSeat: seat, type: "steal" });
-      }
+  // 1) Apply steals first (each = 1 Wild used as steal)
+  steals.forEach(s => {
+    const target = room.players[s.from];
+    if (target && target.chips > 0) {
+      target.chips--;
+      player.chips++;
+      io.to(roomId).emit("chipTransfer", {
+        fromSeat: s.from,
+        toSeat: seat,
+        type: "steal"
+      });
     }
+  });
+
+  // 2) Apply remaining non-canceled Left/Right/Hub (skip canceled dice + unused Wilds)
+  outcomes.forEach((o, i) => {
+    if (canceledIndices.has(i)) return;  // Skip canceled dice
+    if (o === "Wild") return;            // Skip Wilds (their effect already in steals/cancels)
+
+    if (o === "Left" && player.chips > 0) {
+      const leftSeat = getNextSeat(room, seat);
+      player.chips--;
+      room.players[leftSeat].chips++;
+      io.to(roomId).emit("chipTransfer", {
+        fromSeat: seat,
+        toSeat: leftSeat,
+        type: "left"
+      });
+    } else if (o === "Right" && player.chips > 0) {
+      const rightSeat = getNextSeat(room, seat + 2);
+      player.chips--;
+      room.players[rightSeat].chips++;
+      io.to(roomId).emit("chipTransfer", {
+        fromSeat: seat,
+        toSeat: rightSeat,
+        type: "right"
+      });
+    } else if (o === "Hub" && player.chips > 0) {
+      player.chips--;
+      room.centerPot++;
+      io.to(roomId).emit("chipTransfer", {
+        fromSeat: seat,
+        toSeat: null,
+        type: "hub"
+      });
+    }
+  });
+
+  io.to(roomId).emit("historyEntry", {
+    playerName: player.name,
+    outcomesText: outcomes.join(", ")
   });
 
   finalizeTurn(roomId, seat);
@@ -495,6 +533,7 @@ function applyTripleWild(roomId, seat, choice) {
   finalizeTurn(roomId, seat);
 }
 
+/* 🔥 FIXED: Roll button works for ALL players - no double-skip loop */
 function finalizeTurn(roomId, seat) {
   const room = rooms[roomId];
   const player = room.players[seat];
@@ -518,7 +557,6 @@ function finalizeTurn(roomId, seat) {
       pot: room.centerPot
     });
 
-    // Winner takes pot
     if (winner) {
       winner.chips += room.centerPot;
     }
@@ -529,18 +567,12 @@ function finalizeTurn(roomId, seat) {
     return;
   }
 
-  // Always continue clockwise, skipping eliminated / 0-chip players
+  // 🎯 FIXED: getNextSeat already skips eliminated - NO double-skip loop
   room.currentPlayer = getNextSeat(room, seat);
-  while (
-    room.players[room.currentPlayer]?.eliminated ||
-    room.players[room.currentPlayer]?.chips === 0
-  ) {
-    room.currentPlayer = getNextSeat(room, room.currentPlayer);
-  }
 
+  const nextPlayerName = room.players[room.currentPlayer]?.name || `Seat ${room.currentPlayer}`;
   console.log(
-    `➡️ Turn → ${room.players[room.currentPlayer]?.name || "Seat " + room.currentPlayer
-    } (seat ${room.currentPlayer}) - ${playersWithChips} players remain`
+    `➡️ Turn → ${nextPlayerName} (seat ${room.currentPlayer}) - ${playersWithChips} players remain`
   );
 
   broadcastState(roomId);
