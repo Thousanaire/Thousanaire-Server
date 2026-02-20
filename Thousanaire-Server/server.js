@@ -7,8 +7,7 @@ const app = express();
 const server = http.createServer(app);
 
 /* ============================================================
-   FIX: Backend should NOT serve index.html
-   (Prevents ENOENT crash on Render)
+   BACKEND ONLY – NO FRONTEND SERVING
    ============================================================ */
 
 app.get("/", (req, res) => {
@@ -121,58 +120,106 @@ function finalizeTurn(roomId, seat) {
 }
 
 /* ============================================================
-   WILD LOGIC (auto‑resolve already correct)
+   WILD / OUTCOME LOGIC (MIRRORING OLD SINGLE-PLAYER RULES)
    ============================================================ */
 
-function applyWildActions(roomId, seat, outcomes, cancels = [], steals = []) {
+/**
+ * Pure outcomes (no wild actions) – used when there are no Wilds.
+ */
+function applyOutcomesOnlyServer(roomId, seat, outcomes) {
   const room = rooms[roomId];
   if (!room) return;
-
   const player = room.players[seat];
   if (!player) return;
 
-  // OLD FORMAT: outcomes is actually actions array
-  if (!Array.isArray(outcomes)) {
-    const actions = outcomes;
-    if (Array.isArray(actions)) {
-      actions.forEach((a) => {
-        if (a && a.type === "steal") {
-          const target = room.players[a.from];
-          if (target && target.chips > 0) {
-            target.chips--;
-            player.chips++;
-            io.to(roomId).emit("chipTransfer", {
-              fromSeat: a.from,
-              toSeat: seat,
-              type: "steal",
-            });
-          }
-        }
-      });
-    }
-    finalizeTurn(roomId, seat);
-    return;
-  }
-
-  // NEW FORMAT (kept for compatibility)
-  const canceledIndices = new Set(cancels || []);
-
-  steals.forEach((s) => {
-    const target = room.players[s.from];
-    if (target && target.chips > 0) {
-      target.chips--;
-      player.chips++;
+  outcomes.forEach((o) => {
+    if (o === "Left" && player.chips > 0) {
+      const leftSeat = getNextSeat(room, seat);
+      player.chips--;
+      room.players[leftSeat].chips++;
       io.to(roomId).emit("chipTransfer", {
-        fromSeat: s.from,
-        toSeat: seat,
-        type: "steal",
+        fromSeat: seat,
+        toSeat: leftSeat,
+        type: "left",
+      });
+    } else if (o === "Right" && player.chips > 0) {
+      const rightSeat = getNextSeat(room, seat + 2);
+      player.chips--;
+      room.players[rightSeat].chips++;
+      io.to(roomId).emit("chipTransfer", {
+        fromSeat: seat,
+        toSeat: rightSeat,
+        type: "right",
+      });
+    } else if (o === "Hub" && player.chips > 0) {
+      player.chips--;
+      room.centerPot = (room.centerPot || 0) + 1;
+      io.to(roomId).emit("chipTransfer", {
+        fromSeat: seat,
+        toSeat: null,
+        type: "hub",
       });
     }
   });
 
+  io.to(roomId).emit("historyEntry", {
+    playerName: player.name,
+    outcomesText: outcomes.join(", "),
+  });
+
+  finalizeTurn(roomId, seat);
+}
+
+/**
+ * Wild actions path – actions = [{type:"cancel", target:"Left|Right|Hub"}, {type:"steal", from:index}, ...]
+ * Uses the original roll outcomes stored on the room.
+ */
+function applyWildActionsFromActions(roomId, seat, actions) {
+  const room = rooms[roomId];
+  if (!room) return;
+  const player = room.players[seat];
+  if (!player) return;
+
+  const lastRoll = room.lastRoll && room.lastRoll.seat === seat ? room.lastRoll.outcomes : null;
+  if (!lastRoll) {
+    finalizeTurn(roomId, seat);
+    return;
+  }
+
+  const outcomes = lastRoll.slice();
+  const canceledIndices = new Set();
+
+  // 1) Apply cancels and steals based on actions
+  actions.forEach((a) => {
+    if (!a) return;
+
+    if (a.type === "cancel") {
+      const target = a.target; // "Left" | "Right" | "Hub"
+      const idx = outcomes.findIndex(
+        (o, i) => o === target && !canceledIndices.has(i)
+      );
+      if (idx !== -1) {
+        canceledIndices.add(idx);
+      }
+    } else if (a.type === "steal") {
+      const fromSeat = a.from;
+      const target = room.players[fromSeat];
+      if (target && target.chips > 0) {
+        target.chips--;
+        player.chips++;
+        io.to(roomId).emit("chipTransfer", {
+          fromSeat,
+          toSeat: seat,
+          type: "steal",
+        });
+      }
+    }
+  });
+
+  // 2) Apply remaining L/R/Hub outcomes that were NOT canceled
   outcomes.forEach((o, i) => {
     if (canceledIndices.has(i)) return;
-    if (o === "Wild") return;
+    if (o === "Wild") return; // Wilds already used as cancel/steal
 
     if (o === "Left" && player.chips > 0) {
       const leftSeat = getNextSeat(room, seat);
@@ -211,6 +258,26 @@ function applyWildActions(roomId, seat, outcomes, cancels = [], steals = []) {
   finalizeTurn(roomId, seat);
 }
 
+/**
+ * Main entry – keeps old dual behavior:
+ * - Array  => pure outcomes (no wild actions)
+ * - Object => actions array (wild usage)
+ */
+function applyWildActions(roomId, seat, outcomesOrActions) {
+  if (Array.isArray(outcomesOrActions)) {
+    // No wild actions – just apply L/R/Hub
+    applyOutcomesOnlyServer(roomId, seat, outcomesOrActions);
+  } else {
+    // Wild actions from client
+    const actions = outcomesOrActions;
+    if (!Array.isArray(actions)) {
+      finalizeTurn(roomId, seat);
+      return;
+    }
+    applyWildActionsFromActions(roomId, seat, actions);
+  }
+}
+
 /* ============================================================
    SOCKET.IO CONNECTION HANDLING
    ============================================================ */
@@ -245,6 +312,7 @@ io.on("connection", (socket) => {
       currentPlayer: 0,
       centerPot: 0,
       gameState: "waiting",
+      lastRoll: null,
     };
 
     socket.join(roomId);
@@ -326,6 +394,9 @@ io.on("connection", (socket) => {
 
     const outcomesText = rollResults.join(", ");
 
+    // Store last roll for Wild resolution
+    room.lastRoll = { seat, outcomes: rollResults };
+
     io.to(roomId).emit("rollResult", {
       seat,
       outcomes: rollResults,
@@ -357,7 +428,7 @@ io.on("connection", (socket) => {
   });
 
   /* ============================================================
-     AUTO‑RESOLVE WILDS
+     RESOLVE WILDS (ACTIONS ARRAY)
      ============================================================ */
 
   socket.on("resolveWilds", ({ roomId, actions }) => {
@@ -426,6 +497,7 @@ io.on("connection", (socket) => {
     room.currentPlayer = 0;
     room.centerPot = 0;
     room.gameState = "playing";
+    room.lastRoll = null;
 
     io.to(roomId).emit("resetGame");
     broadcastState(roomId);
