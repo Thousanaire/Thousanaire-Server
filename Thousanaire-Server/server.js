@@ -41,7 +41,6 @@ function createRoomId() {
    ============================================================ */
 
 function getNextSeat(room, seat) {
-  // Clockwise, skipping eliminated seats
   for (let i = 1; i <= 4; i++) {
     const s = (seat + i + 4) % 4;
     if (room.players[s] && !room.players[s].eliminated) return s;
@@ -86,17 +85,14 @@ function finalizeTurn(roomId, seat) {
   const player = room.players[seat];
   if (!player) return;
 
-  // Eliminate player if no chips
   if (player.chips <= 0 && !player.eliminated) {
     player.eliminated = true;
-    console.log(`🎲 Player ${player.name} eliminated`);
     io.to(roomId).emit("playerEliminated", {
       seat,
       name: player.name,
     });
   }
 
-  // Check win condition
   const activePlayers = countPlayersWithChips(room);
   if (activePlayers <= 1) {
     let winnerSeat = null;
@@ -117,14 +113,14 @@ function finalizeTurn(roomId, seat) {
     return;
   }
 
-  // Move to next player
   room.currentPlayer = getNextSeat(room, seat);
-
-  // Broadcast updated state
   broadcastState(roomId);
 }
 
-/* 🔥 WILD LOGIC - OLD CLIENT FORMAT (actions array) + NEW FORMAT BACKUP */
+/* ============================================================
+   WILD LOGIC (unchanged except auto‑resolve behavior)
+   ============================================================ */
+
 function applyWildActions(roomId, seat, outcomes, cancels = [], steals = []) {
   const room = rooms[roomId];
   if (!room) return;
@@ -148,8 +144,6 @@ function applyWildActions(roomId, seat, outcomes, cancels = [], steals = []) {
               type: "steal",
             });
           }
-        } else if (a && a.type === "cancel") {
-          // client-side cancel just prevents some Left/Right/Hub; here we do nothing extra
         }
       });
     }
@@ -157,10 +151,9 @@ function applyWildActions(roomId, seat, outcomes, cancels = [], steals = []) {
     return;
   }
 
-  // NEW FORMAT (kept for compatibility, not used by current client)
+  // NEW FORMAT (kept for compatibility)
   const canceledIndices = new Set(cancels || []);
 
-  // 1) Apply steals first
   steals.forEach((s) => {
     const target = room.players[s.from];
     if (target && target.chips > 0) {
@@ -174,7 +167,6 @@ function applyWildActions(roomId, seat, outcomes, cancels = [], steals = []) {
     }
   });
 
-  // 2) Apply remaining non-canceled Left/Right/Hub
   outcomes.forEach((o, i) => {
     if (canceledIndices.has(i)) return;
     if (o === "Wild") return;
@@ -223,20 +215,11 @@ function applyWildActions(roomId, seat, outcomes, cancels = [], steals = []) {
 io.on("connection", (socket) => {
   console.log(`Client connected: ${socket.id}`);
 
-  // Disconnect cleanup
-  socket.on("disconnect", (reason) => {
-    console.log(`🔌 DISCONNECT: ${socket.id} (${reason})`);
-
+  socket.on("disconnect", () => {
     for (const roomId in rooms) {
       const room = rooms[roomId];
       for (let seat = 0; seat < 4; seat++) {
-        if (
-          room.players[seat] &&
-          room.players[seat].socketId === socket.id
-        ) {
-          console.log(
-            `👤 Player "${room.players[seat].name}" unseated from seat ${seat} in ${roomId}`
-          );
+        if (room.players[seat] && room.players[seat].socketId === socket.id) {
           room.players[seat] = null;
           room.seatedCount = Math.max(0, room.seatedCount - 1);
           broadcastState(roomId);
@@ -263,7 +246,6 @@ io.on("connection", (socket) => {
 
     socket.join(roomId);
     socket.emit("roomCreated", { roomId });
-    console.log(`🏠 Room created: ${roomId}`);
   });
 
   socket.on("joinRoom", ({ roomId }) => {
@@ -281,10 +263,6 @@ io.on("connection", (socket) => {
       ),
       seatedCount: room.seatedCount,
     });
-
-    console.log(
-      `👥 Client entered lobby: ${roomId} (${room.seatedCount}/4 seated)`
-    );
   });
 
   socket.on("joinSeat", ({ roomId, name, avatar, color }) => {
@@ -313,34 +291,11 @@ io.on("connection", (socket) => {
     socket.join(roomId);
     socket.emit("joinedRoom", { roomId, seat: openSeat });
 
-    io.to(roomId).emit("playerUpdate", {
-      players: room.players.map((p) =>
-        p
-          ? {
-              name: p.name,
-              chips: p.chips,
-              avatar: p.avatar,
-              color: p.color,
-            }
-          : null
-      ),
-      seatedCount: room.seatedCount,
-    });
-
-    console.log(
-      `✅ "${name}" seated at ${openSeat} (${room.seatedCount}/4) in ${roomId}`
-    );
-
-    // Always broadcast full state so names/avatars show up
     broadcastState(roomId);
 
-    // Start game when 4 seated
     if (room.seatedCount === 4) {
       room.gameState = "playing";
       room.currentPlayer = 0;
-      room.centerPot = room.centerPot || 0;
-
-      console.log(`🎮 Game started in ${roomId}`);
       broadcastState(roomId);
     }
   });
@@ -357,8 +312,6 @@ io.on("connection", (socket) => {
     const player = room.players[seat];
     if (!player || player.eliminated) return;
 
-    console.log(`🎲 ${player.name} (seat ${seat}) ROLLING...`);
-
     const diceFaces = ["Dottt", "Dottt", "Dottt", "Left", "Right", "Wild", "Hub"];
     const rollResults = [];
 
@@ -370,19 +323,13 @@ io.on("connection", (socket) => {
 
     const outcomesText = rollResults.join(", ");
 
-    // Send roll result to all
     io.to(roomId).emit("rollResult", {
       seat,
       outcomes: rollResults,
       outcomesText,
     });
 
-    console.log(
-      `🎲 Roll results for ${player.name}: ${outcomesText}`
-    );
-
-    // Apply dots first
-    let dots = rollResults.filter((r) => r === "Dot").length;
+    let dots = rollResults.filter((r) => r === "Dottt").length;
     if (dots > 0 && player.chips > 0) {
       const chipsToGain = Math.min(dots, 3 - player.chips);
       player.chips += chipsToGain;
@@ -395,13 +342,11 @@ io.on("connection", (socket) => {
     const wildCount = rollResults.filter((r) => r === "Wild").length;
 
     if (wildCount > 0) {
-      // Ask client to choose wild actions (old format)
       io.to(roomId).emit("requestWildChoice", {
         seat,
         outcomes: rollResults,
       });
     } else {
-      // No wilds: apply standard Left/Right/Hub immediately
       applyWildActions(roomId, seat, rollResults);
     }
 
@@ -409,23 +354,23 @@ io.on("connection", (socket) => {
   });
 
   /* ============================================================
-     RESOLVE WILDS (old client format: actions array)
+     AUTO‑RESOLVE WILDS (NO CONFIRM BUTTON)
      ============================================================ */
 
   socket.on("resolveWilds", ({ roomId, actions }) => {
     const room = rooms[roomId];
     if (!room) return;
+
     const seat = room.currentPlayer;
-    console.log(
-      `🧠 Resolving wilds for seat ${seat} in ${roomId}:`,
-      actions
-    );
+
+    // Immediately apply wild actions — no confirmation step
     applyWildActions(roomId, seat, actions);
+
     broadcastState(roomId);
   });
 
   /* ============================================================
-     TRIPLE WILD CHOICE (optional, used by your client)
+     TRIPLE WILD CHOICE (unchanged)
      ============================================================ */
 
   socket.on("tripleWildChoice", ({ roomId, choice }) => {
@@ -482,8 +427,6 @@ io.on("connection", (socket) => {
 
     io.to(roomId).emit("resetGame");
     broadcastState(roomId);
-
-    console.log(`🔄 Game reset in ${roomId}`);
   });
 });
 
@@ -493,7 +436,4 @@ io.on("connection", (socket) => {
 
 server.listen(PORT, () => {
   console.log(`🚀 Thousanaire server running on port ${PORT}`);
-  console.log(`📱 Test at: http://localhost:${PORT}`);
-  console.log(`🌐 Render: https://thousanaire-server.onrender.com`);
 });
-
