@@ -6,13 +6,16 @@ const { Server } = require("socket.io");
 const app = express();
 const server = http.createServer(app);
 
-// Serve frontend from project root
-app.use(express.static(__dirname));
-app.get("*", (req, res) => {
-  res.sendFile(path.join(__dirname, "index.html"));
+/* ============================================================
+   FIX: Backend should NOT serve index.html
+   (Prevents ENOENT crash on Render)
+   ============================================================ */
+
+app.get("/", (req, res) => {
+  res.send("Thousanaire server is running.");
 });
 
-console.log("🚀 Serving files from:", __dirname);
+console.log("🚀 Backend running without static file serving");
 
 const io = new Server(server, {
   cors: {
@@ -118,7 +121,7 @@ function finalizeTurn(roomId, seat) {
 }
 
 /* ============================================================
-   WILD LOGIC (unchanged except auto‑resolve behavior)
+   WILD LOGIC (auto‑resolve already correct)
    ============================================================ */
 
 function applyWildActions(roomId, seat, outcomes, cancels = [], steals = []) {
@@ -354,7 +357,7 @@ io.on("connection", (socket) => {
   });
 
   /* ============================================================
-     AUTO‑RESOLVE WILDS (NO CONFIRM BUTTON)
+     AUTO‑RESOLVE WILDS
      ============================================================ */
 
   socket.on("resolveWilds", ({ roomId, actions }) => {
@@ -363,14 +366,13 @@ io.on("connection", (socket) => {
 
     const seat = room.currentPlayer;
 
-    // Immediately apply wild actions — no confirmation step
     applyWildActions(roomId, seat, actions);
 
     broadcastState(roomId);
   });
 
   /* ============================================================
-     TRIPLE WILD CHOICE (unchanged)
+     TRIPLE WILD CHOICE
      ============================================================ */
 
   socket.on("tripleWildChoice", ({ roomId, choice }) => {
