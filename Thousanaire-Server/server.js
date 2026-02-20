@@ -14,19 +14,22 @@ app.get('*', (req, res) => {
 
 console.log("🚀 Serving files from:", __dirname);
 
+let graceRoundPlayers = new Set();
+let rooms = {};
+
 // 🚀 COMPLETE FIXED SERVER - MOBILE FRIENDLY + IMMORTAL PLAYERS
 const io = new Server(server, {
   cors: {
     origin: "*",
     methods: ["GET", "POST"]
   },
-  pingTimeout: 1200000, // 20 minutes before disconnect
-  pingInterval: 25000,  
-  connectTimeout: 10000 
+  // 🎯 MOBILE TIMEOUT FIX - Survives screen timeout (20 minutes)
+  pingTimeout: 1200000, // 20 minutes before disconnect (default: 20s)
+  pingInterval: 25000,  // Ping every 25 seconds
+  connectTimeout: 10000 // 10s connection timeout
 });
 
 const PORT = process.env.PORT || 10000;
-let rooms = {};
 
 // Auto-clean empty rooms after 5 minutes
 setInterval(() => {
@@ -94,7 +97,7 @@ io.on("connection", (socket) => {
     io.to(roomId).emit("roomUpdate", getRoomState(roomId));
   });
 
-  // 🎯 ROLL BUTTON FIX + FULL TURN LOGIC
+  // 🎯 FIX 1: ROLL BUTTON WORKS + FULL TURN LOGIC
   socket.on("rollDice", ({ roomId }) => {
     const room = rooms[roomId];
     if (!room || room.currentPlayer === undefined) return;
@@ -104,7 +107,6 @@ io.on("connection", (socket) => {
     
     console.log(`🎲 ${player.name} (seat ${room.currentPlayer}) ROLLING...`);
     
-    // Roll 3 dice
     const diceFaces = ["Dot", "Dot", "Dot", "Left", "Right", "Wild", "Hub"];
     const rollResults = [];
     
@@ -112,11 +114,11 @@ io.on("connection", (socket) => {
       rollResults.push(diceFaces[Math.floor(Math.random() * diceFaces.length)]);
     }
     
-    // 🎯 BROADCAST DICE ROLL + FULL STATE
+    // 🎯 CRITICAL: BROADCAST FULL GAME STATE - Enables roll buttons!
     io.to(roomId).emit("playerTurn", {
       currentPlayer: room.currentPlayer,
       chips: room.players.map(p => p ? p.chips : 0),
-      gameStarted: true
+      gameStarted: true  // ← Roll buttons turn GREEN
     });
     
     io.to(roomId).emit("diceRoll", {
@@ -124,33 +126,21 @@ io.on("connection", (socket) => {
       results: rollResults
     });
     
-    console.log(`🎲 Roll: ${rollResults.join(", ")}`);
+    console.log(`🎲 Roll results for ${player.name}: ${rollResults.join(", ")}`);
     
-    // HANDLE DOTS (gain chips)
-    const dots = rollResults.filter(r => r === "Dot").length;
+    // Apply dots first
+    let dots = rollResults.filter(r => r === "Dot").length;
     if (dots > 0 && player.chips < 3) {
       const chipsToGain = Math.min(dots, 3 - player.chips);
       player.chips += chipsToGain;
-      io.to(roomId).emit("chipsGained", { 
-        seat: room.currentPlayer, 
-        count: chipsToGain 
-      });
+      io.to(roomId).emit("chipsGained", { seat: room.currentPlayer, count: chipsToGain });
     }
     
     // 🎯 PERFECT WILD + HUB LOGIC
     const wildCount = rollResults.filter(r => r === "Wild").length;
-    const leftCount = rollResults.filter(r => r === "Left").length;
-    const rightCount = rollResults.filter(r => r === "Right").length;
-    const hubCount = rollResults.filter(r => r === "Hub").length;
-    
     if (wildCount > 0) {
-      // Wild: Player chooses action
-      io.to(roomId).emit("wildActions", { 
-        seat: room.currentPlayer, 
-        outcomes: rollResults 
-      });
+      io.to(roomId).emit("wildActions", { seat: room.currentPlayer, outcomes: rollResults });
     } else {
-      // Auto-apply directional actions
       applyDirectionalActions(roomId, rollResults);
     }
   });
@@ -174,23 +164,29 @@ io.on("connection", (socket) => {
     nextPlayer(roomId);
   });
 
-  // 🎯 TRUE IMMORTAL DISCONNECT - Screen timeouts DON'T unseat
+  // Grace round (keeping your original)
+  socket.on("graceRoll", () => {
+    graceRoundPlayers.add(socket.id);
+    socket.emit("graceRound", true);
+  });
+
+  // 🎯 FIX 2: TRUE IMMORTAL TIMEOUT - Screen timeouts DON'T unseat
   socket.on("disconnect", (reason) => {
     console.log(`🔌 DISCONNECT: ${socket.id} (${reason})`);
     
-    // 🛡️ IMMORTAL: Ignore ALL timeouts/screen locks
+    // 🛡️ TRUE IMMORTAL: Catch ALL timeout scenarios
     if (reason.includes("timeout") || reason.includes("ping") || 
         reason === "transport close" || reason === "io server disconnect") {
       console.log(`🛡️ IMMORTAL MODE: ${socket.id} stays seated (${reason})`);
       return;  // STAYS SEATED FOREVER!
     }
     
-    // ONLY deliberate browser close unseats
+    // ONLY deliberate browser close/tab close unseats
     for (const roomId in rooms) {
       const room = rooms[roomId];
       for (let seat = 0; seat < 4; seat++) {
         if (room.players[seat] && room.players[seat].socketId === socket.id) {
-          console.log(`👤 "${room.players[seat].name}" unseated from seat ${seat}`);
+          console.log(`👤 Player "${room.players[seat].name}" unseated from seat ${seat} in ${roomId}`);
           room.players[seat] = null;
           io.to(roomId).emit("roomUpdate", getRoomState(roomId));
           break;
@@ -220,18 +216,17 @@ function nextPlayer(roomId) {
   });
 }
 
-// 🎯 DIRECTIONAL ACTIONS (Left/Right/Hub)
+// 🎯 COMPLETE DIRECTIONAL ACTIONS (Left/Right/Hub)
 function applyDirectionalActions(roomId, rollResults) {
   const room = rooms[roomId];
   if (!room) return;
   
   const currentSeat = room.currentPlayer;
-  let targetSeat = currentSeat;
   
-  // Hub: Everyone loses 1 chip (if they have any)
+  // 🌐 HUB: Everyone loses 1 chip
   const hubCount = rollResults.filter(r => r === "Hub").length;
   if (hubCount > 0) {
-    console.log(`🌐 HUB ATTACK! Everyone loses 1 chip`);
+    console.log(`🌐 HUB ATTACK from seat ${currentSeat}! Everyone loses 1 chip`);
     room.players.forEach((player, seat) => {
       if (player && player.chips > 0) {
         player.chips = Math.max(0, player.chips - 1);
@@ -240,14 +235,15 @@ function applyDirectionalActions(roomId, rollResults) {
     });
   }
   
-  // Left/Right: Steal chips from neighbor
+  // 👈 LEFT / 👉 RIGHT: Steal from neighbor
   const leftCount = rollResults.filter(r => r === "Left").length;
   const rightCount = rollResults.filter(r => r === "Right").length;
   
+  let targetSeat = currentSeat;
   if (leftCount > 0) {
-    targetSeat = (currentSeat - 1 + 4) % 4; // Previous player
+    targetSeat = (currentSeat - 1 + 4) % 4;
   } else if (rightCount > 0) {
-    targetSeat = (currentSeat + 1) % 4; // Next player
+    targetSeat = (currentSeat + 1) % 4;
   }
   
   const targetPlayer = room.players[targetSeat];
@@ -261,12 +257,13 @@ function applyDirectionalActions(roomId, rollResults) {
       toSeat: currentSeat, 
       count: chipsStolen 
     });
+    console.log(`💰 Seat ${currentSeat} stole ${chipsStolen} from seat ${targetSeat}`);
   }
   
   setTimeout(() => nextPlayer(roomId), 1500);
 }
 
-// HELPERS
+// HELPERS (keeping your original structure)
 function getRoomState(roomId) {
   const room = rooms[roomId];
   return {
