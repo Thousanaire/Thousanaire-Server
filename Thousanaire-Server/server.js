@@ -5,6 +5,10 @@ const { Server } = require("socket.io");
 const app = express();
 const server = http.createServer(app);
 
+// 🎯 FIX 1: SERVE HTML/CSS/JS FILES
+app.use(express.static('public'));
+app.get('/', (req, res) => res.sendFile(__dirname + '/public/index.html'));
+
 // 🚀 COMPLETE FIXED SERVER INITIALIZATION - MOBILE FRIENDLY
 const io = new Server(server, {
   cors: {
@@ -191,6 +195,50 @@ io.on("connection", (socket) => {
           break;
         }
       }
+    }
+  });
+  
+  // 🎯 NEW: joinSeat handler (your game.js expects this!)
+  socket.on("joinSeat", ({ roomId, name, avatar, color }) => {
+    const room = rooms[roomId];
+    if (!room) {
+      socket.emit("error", { message: "Room not found" });
+      return;
+    }
+    
+    const openSeat = room.players.findIndex(p => p === null);
+    if (openSeat === -1) {
+      socket.emit("error", { message: "Room full" });
+      return;
+    }
+    
+    room.players[openSeat] = {
+      name,
+      socketId: socket.id,
+      avatar: avatar || null,
+      color: color || null,
+      chips: 3,
+      eliminated: false
+    };
+    room.seatedCount++;
+    
+    socket.join(roomId);
+    socket.emit("joinedRoom", { roomId, seat: openSeat });  // game.js expects this!
+    
+    io.to(roomId).emit("playerUpdate", {
+      players: room.players.map(p => p ? { name: p.name, chips: p.chips, avatar: p.avatar, color: p.color } : null),
+      seatedCount: room.seatedCount
+    });
+    
+    console.log(`✅ "${name}" (${avatar ? 'avatar' : 'no avatar'}) seated at ${openSeat} (${room.seatedCount}/4) in ${roomId}`);
+    
+    if (room.seatedCount === 4) {
+      room.gameState = "playing";
+      io.to(roomId).emit("gameStart", { 
+        currentPlayer: 0,
+        chips: room.players.map(p => p.chips)
+      });
+      console.log(`🎮 Game started in ${roomId}`);
     }
   });
   
