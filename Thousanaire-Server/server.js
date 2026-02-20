@@ -87,12 +87,29 @@ function finalizeTurn(roomId, seat) {
   const player = room.players[seat];
   if (!player) return;
 
-  if (player.chips <= 0 && !player.eliminated) {
-    player.eliminated = true;
-    io.to(roomId).emit("playerEliminated", {
-      seat,
-      name: player.name,
-    });
+  // GRACE LOGIC:
+  // - First time at 0 chips => grant grace (onGrace = true), do NOT eliminate
+  // - If still 0 chips at end of their next turn => eliminate
+  if (player.chips <= 0) {
+    if (!player.onGrace && !player.eliminated) {
+      player.onGrace = true;
+      io.to(roomId).emit("playerGrace", {
+        seat,
+        name: player.name,
+      });
+    } else if (player.onGrace && !player.eliminated) {
+      player.eliminated = true;
+      player.onGrace = false;
+      io.to(roomId).emit("playerEliminated", {
+        seat,
+        name: player.name,
+      });
+    }
+  } else {
+    // If they have chips again, clear grace
+    if (player.onGrace) {
+      player.onGrace = false;
+    }
   }
 
   const activePlayers = countPlayersWithChips(room);
@@ -356,6 +373,7 @@ io.on("connection", (socket) => {
       color: color || null,
       chips: 3,
       eliminated: false,
+      onGrace: false, // NEW: track grace state
     };
     room.seatedCount++;
 
@@ -491,6 +509,7 @@ io.on("connection", (socket) => {
       if (room.players[i]) {
         room.players[i].chips = 3;
         room.players[i].eliminated = false;
+        room.players[i].onGrace = false; // reset grace
       }
     }
 
