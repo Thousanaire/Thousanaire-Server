@@ -359,7 +359,7 @@ io.on("connection", (socket) => {
 
     console.log(`🎲 ${player.name} (seat ${seat}) ROLLING...`);
 
-    const diceFaces = ["Dot", "Dot", "Dot", "Left", "Right", "Wild", "Hub"];
+    const diceFaces = ["Dottt", "Dottt", "Dottt", "Left", "Right", "Wild", "Hub"];
     const rollResults = [];
 
     for (let i = 0; i < 3; i++) {
@@ -496,3 +496,4 @@ server.listen(PORT, () => {
   console.log(`📱 Test at: http://localhost:${PORT}`);
   console.log(`🌐 Render: https://thousanaire-server.onrender.com`);
 });
+
