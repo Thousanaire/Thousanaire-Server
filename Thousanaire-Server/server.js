@@ -6,7 +6,7 @@ const { Server } = require("socket.io");
 const app = express();
 const server = http.createServer(app);
 
-// Serve frontend from project root (Render-friendly)
+// Serve frontend from project root
 app.use(express.static(__dirname));
 app.get("*", (req, res) => {
   res.sendFile(path.join(__dirname, "index.html"));
@@ -26,33 +26,18 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 10000;
 
-let graceRoundPlayers = new Set();
 let rooms = {};
 
-// Auto-clean empty rooms after 5 minutes
-setInterval(() => {
-  for (const roomId in rooms) {
-    const room = rooms[roomId];
-    const seatedPlayers = Object.values(room.players).filter((p) => p !== null)
-      .length;
-    if (seatedPlayers === 0) {
-      for (let key of graceRoundPlayers) {
-        if (key.startsWith(roomId + "-")) {
-          graceRoundPlayers.delete(key);
-        }
-      }
-      delete rooms[roomId];
-      console.log("🧹 Auto-deleted empty room:", roomId);
-    }
-  }
-}, 5 * 60 * 1000);
+/* ============================================================
+   ROOM / ID HELPERS
+   ============================================================ */
 
 function createRoomId() {
   return Math.random().toString(36).substring(2, 8).toUpperCase();
 }
 
 /* ============================================================
-   HELPER FUNCTIONS
+   GAME HELPERS
    ============================================================ */
 
 function getNextSeat(room, seat) {
@@ -87,8 +72,7 @@ function broadcastState(roomId) {
     eliminated,
     danger,
     centerPot: room.centerPot || 0,
-    currentPlayer:
-      room.gameState === "playing" ? room.currentPlayer : null,
+    currentPlayer: room.gameState === "playing" ? room.currentPlayer : null,
     gameStarted: room.gameState === "playing",
   };
 
@@ -140,7 +124,7 @@ function finalizeTurn(roomId, seat) {
   broadcastState(roomId);
 }
 
-/* 🔥 BACKWARDS COMPATIBLE WILD LOGIC - Handles BOTH old/new client formats */
+/* 🔥 WILD LOGIC - OLD CLIENT FORMAT (actions array) + NEW FORMAT BACKUP */
 function applyWildActions(roomId, seat, outcomes, cancels = [], steals = []) {
   const room = rooms[roomId];
   if (!room) return;
@@ -164,6 +148,8 @@ function applyWildActions(roomId, seat, outcomes, cancels = [], steals = []) {
               type: "steal",
             });
           }
+        } else if (a && a.type === "cancel") {
+          // client-side cancel just prevents some Left/Right/Hub; here we do nothing extra
         }
       });
     }
@@ -171,7 +157,7 @@ function applyWildActions(roomId, seat, outcomes, cancels = [], steals = []) {
     return;
   }
 
-  // NEW FORMAT (not used by current client, but kept for compatibility)
+  // NEW FORMAT (kept for compatibility, not used by current client)
   const canceledIndices = new Set(cancels || []);
 
   // 1) Apply steals first
@@ -237,7 +223,7 @@ function applyWildActions(roomId, seat, outcomes, cancels = [], steals = []) {
 io.on("connection", (socket) => {
   console.log(`Client connected: ${socket.id}`);
 
-  // Graceful disconnect handling
+  // Disconnect cleanup
   socket.on("disconnect", (reason) => {
     console.log(`🔌 DISCONNECT: ${socket.id} (${reason})`);
 
@@ -252,7 +238,7 @@ io.on("connection", (socket) => {
             `👤 Player "${room.players[seat].name}" unseated from seat ${seat} in ${roomId}`
           );
           room.players[seat] = null;
-          room.seatedCount--;
+          room.seatedCount = Math.max(0, room.seatedCount - 1);
           broadcastState(roomId);
           break;
         }
@@ -261,8 +247,24 @@ io.on("connection", (socket) => {
   });
 
   /* ============================================================
-     ROOM LOBBY ENTRY
+     ROOM FLOW
      ============================================================ */
+
+  socket.on("createRoom", () => {
+    const roomId = createRoomId();
+    rooms[roomId] = {
+      id: roomId,
+      players: [null, null, null, null],
+      seatedCount: 0,
+      currentPlayer: 0,
+      centerPot: 0,
+      gameState: "waiting",
+    };
+
+    socket.join(roomId);
+    socket.emit("roomCreated", { roomId });
+    console.log(`🏠 Room created: ${roomId}`);
+  });
 
   socket.on("joinRoom", ({ roomId }) => {
     const room = rooms[roomId];
@@ -299,7 +301,7 @@ io.on("connection", (socket) => {
     }
 
     room.players[openSeat] = {
-      name,
+      name: name.substring(0, 12),
       socketId: socket.id,
       avatar: avatar || null,
       color: color || null,
@@ -329,6 +331,10 @@ io.on("connection", (socket) => {
       `✅ "${name}" seated at ${openSeat} (${room.seatedCount}/4) in ${roomId}`
     );
 
+    // Always broadcast full state so names/avatars show up
+    broadcastState(roomId);
+
+    // Start game when 4 seated
     if (room.seatedCount === 4) {
       room.gameState = "playing";
       room.currentPlayer = 0;
@@ -337,22 +343,6 @@ io.on("connection", (socket) => {
       console.log(`🎮 Game started in ${roomId}`);
       broadcastState(roomId);
     }
-  });
-
-  socket.on("createRoom", () => {
-    const roomId = createRoomId();
-    rooms[roomId] = {
-      id: roomId,
-      players: [null, null, null, null],
-      seatedCount: 0,
-      currentPlayer: 0,
-      centerPot: 0,
-      gameState: "waiting",
-    };
-
-    socket.join(roomId);
-    socket.emit("roomCreated", { roomId });
-    console.log(`🏠 Room created: ${roomId}`);
   });
 
   /* ============================================================
@@ -405,7 +395,7 @@ io.on("connection", (socket) => {
     const wildCount = rollResults.filter((r) => r === "Wild").length;
 
     if (wildCount > 0) {
-      // Ask client to choose wild actions
+      // Ask client to choose wild actions (old format)
       io.to(roomId).emit("requestWildChoice", {
         seat,
         outcomes: rollResults,
@@ -435,7 +425,7 @@ io.on("connection", (socket) => {
   });
 
   /* ============================================================
-     TRIPLE WILD CHOICE (optional)
+     TRIPLE WILD CHOICE (optional, used by your client)
      ============================================================ */
 
   socket.on("tripleWildChoice", ({ roomId, choice }) => {
@@ -496,6 +486,10 @@ io.on("connection", (socket) => {
     console.log(`🔄 Game reset in ${roomId}`);
   });
 });
+
+/* ============================================================
+   SERVER START
+   ============================================================ */
 
 server.listen(PORT, () => {
   console.log(`🚀 Thousanaire server running on port ${PORT}`);
