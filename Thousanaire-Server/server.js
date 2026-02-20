@@ -14,10 +14,7 @@ app.get('*', (req, res) => {
 
 console.log("🚀 Serving files from:", __dirname);
 
-let graceRoundPlayers = new Set();
-let rooms = {};
-
-// 🚀 COMPLETE FIXED SERVER - MOBILE FRIENDLY + IMMORTAL PLAYERS
+// 🚀 COMPLETE FIXED SERVER INITIALIZATION - MOBILE FRIENDLY + IMMORTAL
 const io = new Server(server, {
   cors: {
     origin: "*",
@@ -29,84 +26,293 @@ const io = new Server(server, {
   connectTimeout: 10000 // 10s connection timeout
 });
 
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 10000; // 🔧 RENDER FIX: Uses auto PORT
+
+let graceRoundPlayers = new Set();
+let rooms = {};
 
 // Auto-clean empty rooms after 5 minutes
 setInterval(() => {
   for (const roomId in rooms) {
     const room = rooms[roomId];
-    const seatedCount = room.players.filter(p => p !== null).length;
-    if (seatedCount === 0 && !room.gameStarted) {
-      console.log(`🧹 Auto-cleaning empty room: ${roomId}`);
+    const seatedPlayers = Object.values(room.players).filter(p => p !== null).length;
+    if (seatedPlayers === 0) {
+      for (let key of graceRoundPlayers) {
+        if (key.startsWith(roomId + '-')) {
+          graceRoundPlayers.delete(key);
+        }
+      }
       delete rooms[roomId];
+      console.log("🧹 Auto-deleted empty room:", roomId);
     }
   }
 }, 5 * 60 * 1000);
 
-io.on("connection", (socket) => {
-  console.log(`🔌 CONNECT: ${socket.id}`);
+function createRoomId() {
+  return Math.random().toString(36).substring(2, 8).toUpperCase();
+}
 
-  // CREATE ROOM
-  socket.on("createRoom", ({ roomId, playerName }) => {
-    console.log(`🏠 CREATE: ${playerName} creates ${roomId}`);
-    
-    rooms[roomId] = {
-      players: [null, null, null, null],
-      currentPlayer: 0,
-      gameStarted: false,
-      hostSocketId: socket.id
-    };
-    
-    rooms[roomId].players[0] = {
-      name: playerName,
-      socketId: socket.id,
-      chips: 0,
-      eliminated: false
-    };
-    
-    socket.join(roomId);
-    socket.emit("roomCreated", { roomId, mySeat: 0 });
-    io.to(roomId).emit("roomUpdate", getRoomState(roomId));
+/* ============================================================
+HELPER FUNCTIONS
+============================================================ */
+
+function getNextSeat(room, seat) {
+  // Clockwise, skipping eliminated seats
+  for (let i = 1; i <= 4; i++) {
+    const s = (seat + i + 4) % 4;
+    if (room.players[s] && !room.players[s].eliminated) return s;
+  }
+  return seat;
+}
+
+function countPlayersWithChips(room) {
+  return Object.values(room.players).filter(p => p && p.chips > 0).length;
+}
+
+function finalizeTurn(roomId, seat) {
+  const room = rooms[roomId];
+  if (!room) return;
+  
+  // Eliminate player if no chips
+  if (room.players[seat].chips <= 0) {
+    room.players[seat].eliminated = true;
+    console.log(`🎲 Player ${room.players[seat].name} eliminated`);
+  }
+  
+  // Move to next player
+  room.currentPlayer = getNextSeat(room, seat);
+  
+  // Check win condition
+  const activePlayers = countPlayersWithChips(room);
+  if (activePlayers <= 1) {
+    // Find winner
+    for (let i = 0; i < 4; i++) {
+      if (room.players[i] && room.players[i].chips > 0) {
+        io.to(roomId).emit("gameOver", { winner: room.players[i].name });
+        break;
+      }
+    }
+    return;
+  }
+  
+  // 🎯 FIX: Broadcast FULL game state (enables roll buttons)
+  io.to(roomId).emit("playerTurn", {
+    currentPlayer: room.currentPlayer,
+    chips: room.players.map(p => p ? p.chips : 0),
+    gameStarted: true  // ← CRITICAL for roll button
+  });
+  
+  console.log(`📡 Broadcasting to ${roomId}: currentPlayer=${room.currentPlayer}, chips=${room.players.map(p => p ? p.chips : 0)}`);
+}
+
+/* 🔥 BACKWARDS COMPATIBLE WILD LOGIC - Handles BOTH old/new client formats */
+function applyWildActions(roomId, seat, outcomes, cancels = [], steals = []) {
+  const room = rooms[roomId];
+  if (!room) return;
+  
+  const player = room.players[seat];
+
+  // 🔥 BACKWARDS COMPATIBILITY: Handle old {actions} format OR new {outcomes,cancels,steals}
+  if (!Array.isArray(outcomes)) {
+    // OLD FORMAT: {roomId, actions} - just do steals like before
+    const actions = outcomes; // repurpose param
+    if (Array.isArray(actions)) {
+      actions.forEach(a => {
+        if (a && a.type === "steal") {
+          const target = room.players[a.from];
+          if (target && target.chips > 0) {
+            target.chips--;
+            player.chips++;
+            io.to(roomId).emit("chipTransfer", {
+              fromSeat: a.from,
+              toSeat: seat,
+              type: "steal"
+            });
+          }
+        }
+      });
+    }
+    finalizeTurn(roomId, seat);
+    return;
+  }
+
+  // NEW FORMAT: {roomId, outcomes, cancels, steals} - full wild logic
+  const canceledIndices = new Set(cancels || []);
+
+  // 1) Apply steals first
+  steals.forEach(s => {
+    const target = room.players[s.from];
+    if (target && target.chips > 0) {
+      target.chips--;
+      player.chips++;
+      io.to(roomId).emit("chipTransfer", {
+        fromSeat: s.from,
+        toSeat: seat,
+        type: "steal"
+      });
+    }
   });
 
-  // JOIN ROOM
-  socket.on("joinRoom", ({ roomId, playerName }) => {
+  // 2) Apply remaining non-canceled Left/Right/Hub
+  outcomes.forEach((o, i) => {
+    if (canceledIndices.has(i)) return;
+    if (o === "Wild") return;
+
+    if (o === "Left" && player.chips > 0) {
+      const leftSeat = getNextSeat(room, seat);
+      player.chips--;
+      room.players[leftSeat].chips++;
+      io.to(roomId).emit("chipTransfer", { fromSeat: seat, toSeat: leftSeat, type: "left" });
+    } else if (o === "Right" && player.chips > 0) {
+      const rightSeat = getNextSeat(room, seat + 2);
+      player.chips--;
+      room.players[rightSeat].chips++;
+      io.to(roomId).emit("chipTransfer", { fromSeat: seat, toSeat: rightSeat, type: "right" });
+    } else if (o === "Hub" && player.chips > 0) {
+      player.chips--;
+      room.centerPot = (room.centerPot || 0) + 1;
+      io.to(roomId).emit("chipTransfer", { fromSeat: seat, toSeat: null, type: "hub" });
+    }
+  });
+
+  io.to(roomId).emit("historyEntry", {
+    playerName: player.name,
+    outcomesText: outcomes.join(", ")
+  });
+
+  finalizeTurn(roomId, seat);
+}
+
+// Socket.IO connection handling
+io.on("connection", (socket) => {
+  console.log(`Client connected: ${socket.id}`);
+  
+  // 🎯 FIX 1: IMMORTAL DISCONNECT HANDLER (Screen timeouts DON'T unseat)
+  socket.on("disconnect", (reason) => {
+    console.log(`🔌 DISCONNECT: ${socket.id} (${reason})`);
+    
+    // 🛡️ IMMORTAL MODE: Ignore screen timeouts/ping timeouts
+    if (reason.includes("timeout") || reason.includes("ping") || 
+        reason === "transport close" || reason === "io server disconnect") {
+      console.log(`🛡️ IMMORTAL MODE: ${socket.id} stays seated (${reason})`);
+      return;  // STAYS SEATED!
+    }
+    
+    // Only deliberate disconnects unseat
+    for (const roomId in rooms) {
+      const room = rooms[roomId];
+      for (let seat = 0; seat < 4; seat++) {
+        if (room.players[seat] && room.players[seat].socketId === socket.id) {
+          console.log(`👤 Player "${room.players[seat].name}" unseated from seat ${seat} in ${roomId}`);
+          room.players[seat] = null;
+          break;
+        }
+      }
+    }
+  });
+  
+  // 🎯 ROOM LOBBY ENTRY - Friends enter code first
+  socket.on("joinRoom", ({ roomId }) => {
     const room = rooms[roomId];
     if (!room) {
       socket.emit("error", { message: "Room not found" });
       return;
     }
-
-    const seat = room.players.findIndex(p => p === null);
-    if (seat === -1) {
+    
+    socket.join(roomId);
+    socket.emit("roomJoined", { 
+      roomId, 
+      players: room.players.map(p => p ? { name: p.name, chips: p.chips } : null),
+      seatedCount: room.seatedCount 
+    });
+    
+    console.log(`👥 Client entered lobby: ${roomId} (${room.seatedCount}/4 seated)`);
+  });
+  
+  // 🎯 JOIN SEAT - After name/avatar/color selection
+  socket.on("joinSeat", ({ roomId, name, avatar, color }) => {
+    const room = rooms[roomId];
+    if (!room) {
+      socket.emit("error", { message: "Room not found" });
+      return;
+    }
+    
+    const openSeat = room.players.findIndex(p => p === null);
+    if (openSeat === -1) {
       socket.emit("error", { message: "Room full" });
       return;
     }
-
-    room.players[seat] = {
-      name: playerName,
+    
+    room.players[openSeat] = {
+      name,
       socketId: socket.id,
-      chips: 0,
+      avatar: avatar || null,
+      color: color || null,
+      chips: 3,
       eliminated: false
     };
-
-    socket.join(roomId);
-    console.log(`👤 ${playerName} joined ${roomId} (seat ${seat})`);
+    room.seatedCount++;
     
-    socket.emit("joinedRoom", { roomId, mySeat: seat });
-    io.to(roomId).emit("roomUpdate", getRoomState(roomId));
+    socket.join(roomId);
+    socket.emit("joinedRoom", { roomId, seat: openSeat });
+    
+    io.to(roomId).emit("playerUpdate", {
+      players: room.players.map(p => p ? { name: p.name, chips: p.chips, avatar: p.avatar, color: p.color } : null),
+      seatedCount: room.seatedCount
+    });
+    
+    console.log(`✅ "${name}" (${avatar ? 'avatar' : 'no avatar'}) seated at ${openSeat} (${room.seatedCount}/4) in ${roomId}`);
+    
+    if (room.seatedCount === 4) {
+      room.gameState = "playing";
+      io.to(roomId).emit("gameStart", { 
+        currentPlayer: 0,
+        chips: room.players.map(p => p.chips),
+        gameStarted: true  // 🎯 FIX: Enable roll buttons
+      });
+      console.log(`🎮 Game started in ${roomId}`);
+    }
   });
+  
+  socket.on("createRoom", () => {
+    const roomId = createRoomId();
+    rooms[roomId] = {
+      id: roomId,
+      players: [null, null, null, null],
+      seatedCount: 0,
+      currentPlayer: 0,
+      centerPot: 0,
+      gameState: "waiting"
+    };
+    
+    socket.join(roomId);
+    socket.emit("roomCreated", { roomId });
+    console.log(`🏠 Room created: ${roomId}`);
+  });
+  
+  // 🎯 FIX 2: SAFE rollDice - Prevents undefined crash
+  socket.on("rollDice", (data) => {
+    // 🛡️ SAFE: Check data exists
+    if (!data || !data.roomId) {
+      console.log("❌ rollDice: missing roomId", data);
+      return;
+    }
 
-  // 🎯 FIX 1: ROLL BUTTON WORKS + FULL TURN LOGIC
-  socket.on("rollDice", ({ roomId }) => {
-    const room = rooms[roomId];
-    if (!room || room.currentPlayer === undefined) return;
+    const room = rooms[data.roomId];
+    if (!room || room.currentPlayer === undefined) {
+      console.log("❌ rollDice: invalid room");
+      return;
+    }
     
     const player = room.players[room.currentPlayer];
-    if (!player || player.eliminated) return;
+    if (!player || player.eliminated) {
+      console.log("❌ rollDice: player eliminated");
+      return;
+    }
     
     console.log(`🎲 ${player.name} (seat ${room.currentPlayer}) ROLLING...`);
     
+    // Simulate dice roll (Dot, Dot, Dot, Left, Right, Wild, Hub)
     const diceFaces = ["Dot", "Dot", "Dot", "Left", "Right", "Wild", "Hub"];
     const rollResults = [];
     
@@ -114,14 +320,14 @@ io.on("connection", (socket) => {
       rollResults.push(diceFaces[Math.floor(Math.random() * diceFaces.length)]);
     }
     
-    // 🎯 CRITICAL: BROADCAST FULL GAME STATE - Enables roll buttons!
-    io.to(roomId).emit("playerTurn", {
+    // 🎯 FIX: Broadcast FULL state (roll buttons work!)
+    io.to(data.roomId).emit("playerTurn", {
       currentPlayer: room.currentPlayer,
       chips: room.players.map(p => p ? p.chips : 0),
-      gameStarted: true  // ← Roll buttons turn GREEN
+      gameStarted: true  // ← CRITICAL
     });
     
-    io.to(roomId).emit("diceRoll", {
+    io.to(data.roomId).emit("diceRoll", {
       seat: room.currentPlayer,
       results: rollResults
     });
@@ -130,153 +336,60 @@ io.on("connection", (socket) => {
     
     // Apply dots first
     let dots = rollResults.filter(r => r === "Dot").length;
-    if (dots > 0 && player.chips < 3) {
+    if (dots > 0 && player.chips > 0) {
       const chipsToGain = Math.min(dots, 3 - player.chips);
       player.chips += chipsToGain;
-      io.to(roomId).emit("chipsGained", { seat: room.currentPlayer, count: chipsToGain });
+      io.to(data.roomId).emit("chipsGained", {
+        seat: room.currentPlayer,
+        count: chipsToGain
+      });
     }
     
-    // 🎯 PERFECT WILD + HUB LOGIC
+    // Handle wild actions
     const wildCount = rollResults.filter(r => r === "Wild").length;
     if (wildCount > 0) {
-      io.to(roomId).emit("wildActions", { seat: room.currentPlayer, outcomes: rollResults });
+      io.to(data.roomId).emit("wildActions", {
+        seat: room.currentPlayer,
+        outcomes: rollResults
+      });
     } else {
-      applyDirectionalActions(roomId, rollResults);
+      applyWildActions(data.roomId, room.currentPlayer, rollResults);
     }
   });
-
-  // START GAME
-  socket.on("startGame", ({ roomId }) => {
+  
+  socket.on("wildActions", (data) => {
+    if (!data || !data.roomId) return;
+    applyWildActions(data.roomId, data.seat, data.outcomes, data.cancels || [], data.steals || []);
+  });
+  
+  socket.on("resetGame", ({ roomId }) => {
     const room = rooms[roomId];
-    if (!room || room.hostSocketId !== socket.id) return;
+    if (!room) return;
     
-    room.gameStarted = true;
-    io.to(roomId).emit("gameStarted", { 
-      currentPlayer: 0,
-      chips: room.players.map(p => p ? p.chips : 0),
-      gameStarted: true 
-    });
-  });
-
-  // WILD ACTION COMPLETE → NEXT TURN
-  socket.on("wildActionComplete", ({ roomId, action }) => {
-    console.log(`🎯 Wild action complete: ${action}`);
-    nextPlayer(roomId);
-  });
-
-  // Grace round (keeping your original)
-  socket.on("graceRoll", () => {
-    graceRoundPlayers.add(socket.id);
-    socket.emit("graceRound", true);
-  });
-
-  // 🎯 FIX 2: TRUE IMMORTAL TIMEOUT - Screen timeouts DON'T unseat
-  socket.on("disconnect", (reason) => {
-    console.log(`🔌 DISCONNECT: ${socket.id} (${reason})`);
-    
-    // 🛡️ TRUE IMMORTAL: Catch ALL timeout scenarios
-    if (reason.includes("timeout") || reason.includes("ping") || 
-        reason === "transport close" || reason === "io server disconnect") {
-      console.log(`🛡️ IMMORTAL MODE: ${socket.id} stays seated (${reason})`);
-      return;  // STAYS SEATED FOREVER!
-    }
-    
-    // ONLY deliberate browser close/tab close unseats
-    for (const roomId in rooms) {
-      const room = rooms[roomId];
-      for (let seat = 0; seat < 4; seat++) {
-        if (room.players[seat] && room.players[seat].socketId === socket.id) {
-          console.log(`👤 Player "${room.players[seat].name}" unseated from seat ${seat} in ${roomId}`);
-          room.players[seat] = null;
-          io.to(roomId).emit("roomUpdate", getRoomState(roomId));
-          break;
-        }
+    // Reset all players
+    for (let i = 0; i < 4; i++) {
+      if (room.players[i]) {
+        room.players[i].chips = 3;
+        room.players[i].eliminated = false;
       }
     }
+    
+    room.currentPlayer = 0;
+    room.centerPot = 0;
+    room.gameState = "playing";
+    
+    io.to(roomId).emit("gameReset", {
+      currentPlayer: 0,
+      chips: room.players.map(p => p ? p.chips : 0),
+      gameStarted: true
+    });
+    
+    console.log(`🔄 Game reset in ${roomId}`);
   });
 });
 
-// 🔄 PERFECT CLOCKWISE TURN ROTATION (SKIPS ELIMINATED)
-function nextPlayer(roomId) {
-  const room = rooms[roomId];
-  if (!room) return;
-  
-  let attempts = 0;
-  do {
-    room.currentPlayer = (room.currentPlayer + 1) % 4;
-    attempts++;
-  } while (room.players[room.currentPlayer]?.eliminated && attempts < 4);
-  
-  console.log(`🔄 Next player: seat ${room.currentPlayer} (${room.players[room.currentPlayer]?.name || 'EMPTY'})`);
-  
-  io.to(roomId).emit("playerTurn", {
-    currentPlayer: room.currentPlayer,
-    chips: room.players.map(p => p ? p.chips : 0),
-    gameStarted: true
-  });
-}
-
-// 🎯 COMPLETE DIRECTIONAL ACTIONS (Left/Right/Hub)
-function applyDirectionalActions(roomId, rollResults) {
-  const room = rooms[roomId];
-  if (!room) return;
-  
-  const currentSeat = room.currentPlayer;
-  
-  // 🌐 HUB: Everyone loses 1 chip
-  const hubCount = rollResults.filter(r => r === "Hub").length;
-  if (hubCount > 0) {
-    console.log(`🌐 HUB ATTACK from seat ${currentSeat}! Everyone loses 1 chip`);
-    room.players.forEach((player, seat) => {
-      if (player && player.chips > 0) {
-        player.chips = Math.max(0, player.chips - 1);
-        io.to(roomId).emit("chipsLost", { seat, count: 1 });
-      }
-    });
-  }
-  
-  // 👈 LEFT / 👉 RIGHT: Steal from neighbor
-  const leftCount = rollResults.filter(r => r === "Left").length;
-  const rightCount = rollResults.filter(r => r === "Right").length;
-  
-  let targetSeat = currentSeat;
-  if (leftCount > 0) {
-    targetSeat = (currentSeat - 1 + 4) % 4;
-  } else if (rightCount > 0) {
-    targetSeat = (currentSeat + 1) % 4;
-  }
-  
-  const targetPlayer = room.players[targetSeat];
-  if (targetPlayer && targetPlayer.chips > 0) {
-    const chipsStolen = Math.min(1, targetPlayer.chips);
-    targetPlayer.chips -= chipsStolen;
-    room.players[currentSeat].chips += chipsStolen;
-    
-    io.to(roomId).emit("chipsStolen", { 
-      fromSeat: targetSeat, 
-      toSeat: currentSeat, 
-      count: chipsStolen 
-    });
-    console.log(`💰 Seat ${currentSeat} stole ${chipsStolen} from seat ${targetSeat}`);
-  }
-  
-  setTimeout(() => nextPlayer(roomId), 1500);
-}
-
-// HELPERS (keeping your original structure)
-function getRoomState(roomId) {
-  const room = rooms[roomId];
-  return {
-    players: room.players.map(p => p ? { 
-      name: p.name, 
-      chips: p.chips, 
-      eliminated: p.eliminated 
-    } : null),
-    currentPlayer: room.currentPlayer,
-    gameStarted: room.gameStarted
-  };
-}
-
 server.listen(PORT, () => {
-  console.log(`🎮 Server running on port ${PORT}`);
+  console.log(`🚀 Thousanaire server running on port ${PORT}`);
+  console.log(`📱 Test at: http://localhost:${PORT}`);
+  console.log(`🌐 Render: https://thousanaire-server.onrender.com`);
 });
