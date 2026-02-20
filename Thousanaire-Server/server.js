@@ -95,7 +95,7 @@ function finalizeTurn(roomId, seat) {
     return;
   }
   
-  // 🎯 FIX: Broadcast FULL game state (enables roll buttons)
+  // 🎯 FIXED: Broadcast FULL game state (enables roll buttons)
   io.to(roomId).emit("playerTurn", {
     currentPlayer: room.currentPlayer,
     chips: room.players.map(p => p ? p.chips : 0),
@@ -205,6 +205,10 @@ io.on("connection", (socket) => {
         if (room.players[seat] && room.players[seat].socketId === socket.id) {
           console.log(`👤 Player "${room.players[seat].name}" unseated from seat ${seat} in ${roomId}`);
           room.players[seat] = null;
+          io.to(roomId).emit("playerUpdate", {
+            players: room.players.map(p => p ? { name: p.name, chips: p.chips, avatar: p.avatar, color: p.color } : null),
+            seatedCount: (room.seatedCount || 0) - 1
+          });
           break;
         }
       }
@@ -212,25 +216,35 @@ io.on("connection", (socket) => {
   });
   
   // 🎯 ROOM LOBBY ENTRY - Friends enter code first
-  socket.on("joinRoom", ({ roomId }) => {
-    const room = rooms[roomId];
+  socket.on("joinRoom", (data) => {
+    if (!data || !data.roomId) {
+      console.log("❌ joinRoom: missing roomId", data);
+      return;
+    }
+    const room = rooms[data.roomId];
     if (!room) {
       socket.emit("error", { message: "Room not found" });
       return;
     }
     
-    socket.join(roomId);
+    socket.join(data.roomId);
     socket.emit("roomJoined", { 
-      roomId, 
+      roomId: data.roomId, 
       players: room.players.map(p => p ? { name: p.name, chips: p.chips } : null),
-      seatedCount: room.seatedCount 
+      seatedCount: room.seatedCount || 0 
     });
     
-    console.log(`👥 Client entered lobby: ${roomId} (${room.seatedCount}/4 seated)`);
+    console.log(`👥 Client entered lobby: ${data.roomId} (${room.seatedCount || 0}/4 seated)`);
   });
   
-  // 🎯 JOIN SEAT - After name/avatar/color selection
-  socket.on("joinSeat", ({ roomId, name, avatar, color }) => {
+  // 🎯 JOIN SEAT - After name/avatar/color selection - **CRITICAL ROLL BUTTON FIX**
+  socket.on("joinSeat", (data) => {
+    if (!data || !data.roomId) {
+      console.log("❌ joinSeat: missing roomId", data);
+      return;
+    }
+    
+    const { roomId, name, avatar, color } = data;
     const room = rooms[roomId];
     if (!room) {
       socket.emit("error", { message: "Room not found" });
@@ -251,26 +265,38 @@ io.on("connection", (socket) => {
       chips: 3,
       eliminated: false
     };
-    room.seatedCount++;
+    room.seatedCount = (room.seatedCount || 0) + 1;
     
     socket.join(roomId);
     socket.emit("joinedRoom", { roomId, seat: openSeat });
     
     io.to(roomId).emit("playerUpdate", {
-      players: room.players.map(p => p ? { name: p.name, chips: p.chips, avatar: p.avatar, color: p.color } : null),
+      players: room.players.map(p => p ? { name: p.name, chips: p.chips, avatar: p.avatar, color: p.color, eliminated: p.eliminated } : null),
       seatedCount: room.seatedCount
     });
     
     console.log(`✅ "${name}" (${avatar ? 'avatar' : 'no avatar'}) seated at ${openSeat} (${room.seatedCount}/4) in ${roomId}`);
     
+    // 🎯 CRITICAL FIX: Auto-start game + Host roll button when 4 players
     if (room.seatedCount === 4) {
       room.gameState = "playing";
+      room.gameStarted = true;  // 🎯 ENABLE GAME STATE
+      room.currentPlayer = 0;   // 🎯 HOST STARTS
+      
       io.to(roomId).emit("gameStart", { 
         currentPlayer: 0,
-        chips: room.players.map(p => p.chips),
-        gameStarted: true  // 🎯 FIX: Enable roll buttons
+        chips: room.players.map(p => p ? p.chips : 0),
+        gameStarted: true
       });
-      console.log(`🎮 Game started in ${roomId}`);
+      
+      // 🎯 CRITICAL: Broadcast playerTurn for HOST (seat 0) - GREEN BUTTON!
+      io.to(roomId).emit("playerTurn", {
+        currentPlayer: 0,
+        chips: room.players.map(p => p ? p.chips : 0),
+        gameStarted: true  // ← ROLL BUTTON GREEN FOR HOST!
+      });
+      
+      console.log(`🎮 Game started in ${roomId} - HOST (seat 0) turn! 🎲`);
     }
   });
   
@@ -282,7 +308,8 @@ io.on("connection", (socket) => {
       seatedCount: 0,
       currentPlayer: 0,
       centerPot: 0,
-      gameState: "waiting"
+      gameState: "waiting",
+      gameStarted: false
     };
     
     socket.join(roomId);
@@ -290,9 +317,8 @@ io.on("connection", (socket) => {
     console.log(`🏠 Room created: ${roomId}`);
   });
   
-  // 🎯 FIX 2: SAFE rollDice - Prevents undefined crash
+  // 🎯 FIX 3: SAFE rollDice with FULL state broadcast
   socket.on("rollDice", (data) => {
-    // 🛡️ SAFE: Check data exists
     if (!data || !data.roomId) {
       console.log("❌ rollDice: missing roomId", data);
       return;
@@ -320,11 +346,11 @@ io.on("connection", (socket) => {
       rollResults.push(diceFaces[Math.floor(Math.random() * diceFaces.length)]);
     }
     
-    // 🎯 FIX: Broadcast FULL state (roll buttons work!)
+    // 🎯 FIXED: Broadcast FULL state FIRST (roll buttons stay enabled)
     io.to(data.roomId).emit("playerTurn", {
       currentPlayer: room.currentPlayer,
       chips: room.players.map(p => p ? p.chips : 0),
-      gameStarted: true  // ← CRITICAL
+      gameStarted: true
     });
     
     io.to(data.roomId).emit("diceRoll", {
@@ -336,7 +362,7 @@ io.on("connection", (socket) => {
     
     // Apply dots first
     let dots = rollResults.filter(r => r === "Dot").length;
-    if (dots > 0 && player.chips > 0) {
+    if (dots > 0 && player.chips < 3) {  // Fixed: < 3 not > 0
       const chipsToGain = Math.min(dots, 3 - player.chips);
       player.chips += chipsToGain;
       io.to(data.roomId).emit("chipsGained", {
@@ -358,12 +384,16 @@ io.on("connection", (socket) => {
   });
   
   socket.on("wildActions", (data) => {
-    if (!data || !data.roomId) return;
+    if (!data || !data.roomId) {
+      console.log("❌ wildActions: missing data");
+      return;
+    }
     applyWildActions(data.roomId, data.seat, data.outcomes, data.cancels || [], data.steals || []);
   });
   
-  socket.on("resetGame", ({ roomId }) => {
-    const room = rooms[roomId];
+  socket.on("resetGame", (data) => {
+    if (!data || !data.roomId) return;
+    const room = rooms[data.roomId];
     if (!room) return;
     
     // Reset all players
@@ -377,14 +407,22 @@ io.on("connection", (socket) => {
     room.currentPlayer = 0;
     room.centerPot = 0;
     room.gameState = "playing";
+    room.gameStarted = true;
     
-    io.to(roomId).emit("gameReset", {
+    io.to(data.roomId).emit("gameReset", {
       currentPlayer: 0,
       chips: room.players.map(p => p ? p.chips : 0),
       gameStarted: true
     });
     
-    console.log(`🔄 Game reset in ${roomId}`);
+    // Start with host turn
+    io.to(data.roomId).emit("playerTurn", {
+      currentPlayer: 0,
+      chips: room.players.map(p => p ? p.chips : 0),
+      gameStarted: true
+    });
+    
+    console.log(`🔄 Game reset in ${data.roomId}`);
   });
 });
 
