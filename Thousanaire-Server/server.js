@@ -1,13 +1,18 @@
 const express = require("express");
 const http = require("http");
+const path = require('path');
 const { Server } = require("socket.io");
 
 const app = express();
 const server = http.createServer(app);
 
-// 🎯 FIX 1: SERVE HTML/CSS/JS FILES
-app.use(express.static('public'));
-app.get('/', (req, res) => res.sendFile(__dirname + '/public/index.html'));
+// 🎯 RENDER.COM READY: Serve ALL frontend files from project root
+app.use(express.static(__dirname));
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'index.html'));
+});
+
+console.log("🚀 Serving files from:", __dirname);
 
 // 🚀 COMPLETE FIXED SERVER INITIALIZATION - MOBILE FRIENDLY
 const io = new Server(server, {
@@ -198,7 +203,25 @@ io.on("connection", (socket) => {
     }
   });
   
-  // 🎯 NEW: joinSeat handler (your game.js expects this!)
+  // 🎯 ROOM LOBBY ENTRY - Friends enter code first
+  socket.on("joinRoom", ({ roomId }) => {
+    const room = rooms[roomId];
+    if (!room) {
+      socket.emit("error", { message: "Room not found" });
+      return;
+    }
+    
+    socket.join(roomId);
+    socket.emit("roomJoined", { 
+      roomId, 
+      players: room.players.map(p => p ? { name: p.name, chips: p.chips } : null),
+      seatedCount: room.seatedCount 
+    });
+    
+    console.log(`👥 Client entered lobby: ${roomId} (${room.seatedCount}/4 seated)`);
+  });
+  
+  // 🎯 JOIN SEAT - After name/avatar/color selection
   socket.on("joinSeat", ({ roomId, name, avatar, color }) => {
     const room = rooms[roomId];
     if (!room) {
@@ -223,7 +246,7 @@ io.on("connection", (socket) => {
     room.seatedCount++;
     
     socket.join(roomId);
-    socket.emit("joinedRoom", { roomId, seat: openSeat });  // game.js expects this!
+    socket.emit("joinedRoom", { roomId, seat: openSeat });
     
     io.to(roomId).emit("playerUpdate", {
       players: room.players.map(p => p ? { name: p.name, chips: p.chips, avatar: p.avatar, color: p.color } : null),
@@ -256,46 +279,6 @@ io.on("connection", (socket) => {
     socket.join(roomId);
     socket.emit("roomCreated", { roomId });
     console.log(`🏠 Room created: ${roomId}`);
-  });
-  
-  socket.on("joinRoom", ({ roomId, playerName }) => {
-    const room = rooms[roomId];
-    if (!room) {
-      socket.emit("error", { message: "Room not found" });
-      return;
-    }
-    
-    const openSeat = room.players.findIndex(p => p === null);
-    if (openSeat === -1) {
-      socket.emit("error", { message: "Room full" });
-      return;
-    }
-    
-    room.players[openSeat] = {
-      name: playerName,
-      socketId: socket.id,
-      chips: 3,
-      eliminated: false
-    };
-    room.seatedCount++;
-    
-    socket.join(roomId);
-    
-    io.to(roomId).emit("playerUpdate", {
-      players: room.players.map(p => p ? { name: p.name, chips: p.chips } : null),
-      seatedCount: room.seatedCount
-    });
-    
-    console.log(`✅ Player "${playerName}" (${playerName}) seated at ${openSeat} (${room.seatedCount}/4) in ${roomId}`);
-    
-    if (room.seatedCount === 4) {
-      room.gameState = "playing";
-      io.to(roomId).emit("gameStart", { 
-        currentPlayer: 0,
-        chips: room.players.map(p => p.chips)
-      });
-      console.log(`🎮 Game started in ${roomId}`);
-    }
   });
   
   socket.on("rollDice", ({ roomId }) => {
@@ -336,13 +319,11 @@ io.on("connection", (socket) => {
     // Handle wild actions
     const wildCount = rollResults.filter(r => r === "Wild").length;
     if (wildCount > 0) {
-      // Send wild outcomes for client to handle UI
       io.to(roomId).emit("wildActions", {
         seat: room.currentPlayer,
         outcomes: rollResults
       });
     } else {
-      // No wilds - just end turn
       applyWildActions(roomId, room.currentPlayer, rollResults);
     }
   });
@@ -379,4 +360,5 @@ io.on("connection", (socket) => {
 server.listen(PORT, () => {
   console.log(`🚀 Thousanaire server running on port ${PORT}`);
   console.log(`📱 Test at: http://localhost:${PORT}`);
+  console.log(`🌐 Render: https://thousanaire-server.onrender.com`);
 });
