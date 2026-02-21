@@ -481,15 +481,15 @@ io.on("connection", (socket) => {
   });
 
   /* ============================================================
-     RESOLVE WILDS — ⭐ PATCHED ⭐
+     RESOLVE WILDS — ⭐ FIXED ⭐
      ============================================================ */
 
   socket.on("resolveWilds", ({ roomId, seat, actions }) => {
     const room = rooms[roomId];
     if (!room) return;
 
-    // Use the seat sent by the client
-    applyWildActions(roomId, seat, actions);
+    // ⭐ FIX: Use the correct Wild-action engine
+    applyWildActionsFromActions(roomId, seat, actions);
 
     broadcastState(roomId);
   });
