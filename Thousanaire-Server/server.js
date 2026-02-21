@@ -203,7 +203,6 @@ function applyWildActionsFromActions(roomId, seat, actions) {
 
   const outcomes = lastRoll.slice();
 
-  // Track wilds by index
   const wildIndices = outcomes
     .map((o, i) => (o === "Wild" ? i : null))
     .filter((i) => i !== null);
@@ -212,11 +211,9 @@ function applyWildActionsFromActions(roomId, seat, actions) {
   const wildUsedAsCancel = new Set();
   const wildUsedAsSteal = new Set();
 
-  // 1) Apply cancels and steals based on actions
   actions.forEach((a) => {
     if (!a) return;
 
-    // CANCEL
     if (a.type === "cancel") {
       const target = a.target;
       const idx = outcomes.findIndex(
@@ -230,7 +227,6 @@ function applyWildActionsFromActions(roomId, seat, actions) {
       }
     }
 
-    // STEAL
     if (a.type === "steal") {
       const fromSeat = a.from;
       const target = room.players[fromSeat];
@@ -252,15 +248,13 @@ function applyWildActionsFromActions(roomId, seat, actions) {
     }
   });
 
-  // 2) Apply remaining outcomes (L/R/Hub) that were NOT canceled
   outcomes.forEach((o, i) => {
     if (canceledIndices.has(i)) return;
 
-    // Skip wilds that were used as cancel or steal
     if (wildIndices.includes(i)) {
       if (wildUsedAsCancel.has(i)) return;
       if (wildUsedAsSteal.has(i)) return;
-      return; // unused wilds do nothing here
+      return;
     }
 
     if (o === "Left" && player.chips > 0) {
@@ -487,28 +481,27 @@ io.on("connection", (socket) => {
   });
 
   /* ============================================================
-     RESOLVE WILDS
+     RESOLVE WILDS — ⭐ PATCHED ⭐
      ============================================================ */
 
-  socket.on("resolveWilds", ({ roomId, actions }) => {
+  socket.on("resolveWilds", ({ roomId, seat, actions }) => {
     const room = rooms[roomId];
     if (!room) return;
 
-    const seat = room.currentPlayer;
-
+    // Use the seat sent by the client
     applyWildActions(roomId, seat, actions);
 
     broadcastState(roomId);
   });
 
   /* ============================================================
-     TRIPLE WILD CHOICE
+     TRIPLE WILD CHOICE — ⭐ PATCHED ⭐
      ============================================================ */
 
-  socket.on("tripleWildChoice", ({ roomId, choice }) => {
+  socket.on("tripleWildChoice", ({ roomId, seat, choice }) => {
     const room = rooms[roomId];
     if (!room) return;
-    const seat = room.currentPlayer;
+
     const player = room.players[seat];
     if (!player) return;
 
