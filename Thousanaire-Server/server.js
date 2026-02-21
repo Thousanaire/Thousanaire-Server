@@ -87,17 +87,17 @@ function finalizeTurn(roomId, seat) {
   const player = room.players[seat];
   if (!player) return;
 
-  // GRACE LOGIC:
-  // - First time at 0 chips => grant grace (onGrace = true), do NOT eliminate
-  // - If still 0 chips at end of their next turn => eliminate
+  // GRACE TURN LOGIC
   if (player.chips <= 0) {
     if (!player.onGrace && !player.eliminated) {
+      // First time hitting 0 chips -> grace turn
       player.onGrace = true;
       io.to(roomId).emit("playerGrace", {
         seat,
         name: player.name,
       });
     } else if (player.onGrace && !player.eliminated) {
+      // Still 0 after grace -> eliminated
       player.eliminated = true;
       player.onGrace = false;
       io.to(roomId).emit("playerEliminated", {
@@ -197,7 +197,10 @@ function applyWildActionsFromActions(roomId, seat, actions) {
   const player = room.players[seat];
   if (!player) return;
 
-  const lastRoll = room.lastRoll && room.lastRoll.seat === seat ? room.lastRoll.outcomes : null;
+  const lastRoll =
+    room.lastRoll && room.lastRoll.seat === seat
+      ? room.lastRoll.outcomes
+      : null;
   if (!lastRoll) {
     finalizeTurn(roomId, seat);
     return;
@@ -236,7 +239,7 @@ function applyWildActionsFromActions(roomId, seat, actions) {
   // 2) Apply remaining L/R/Hub outcomes that were NOT canceled
   outcomes.forEach((o, i) => {
     if (canceledIndices.has(i)) return;
-    if (o === "Wild") return; // Wilds already used as cancel/steal
+    if (o === "Wild") return; // Wilds already used as cancel/steal via actions
 
     if (o === "Left" && player.chips > 0) {
       const leftSeat = getNextSeat(room, seat);
@@ -303,17 +306,25 @@ io.on("connection", (socket) => {
   console.log(`Client connected: ${socket.id}`);
 
   socket.on("disconnect", () => {
-    for (const roomId in rooms) {
-      const room = rooms[roomId];
-      for (let seat = 0; seat < 4; seat++) {
-        if (room.players[seat] && room.players[seat].socketId === socket.id) {
-          room.players[seat] = null;
-          room.seatedCount = Math.max(0, room.seatedCount - 1);
-          broadcastState(roomId);
-          break;
+    const DISCONNECT_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+
+    setTimeout(() => {
+      for (const roomId in rooms) {
+        const room = rooms[roomId];
+        for (let seat = 0; seat < 4; seat++) {
+          const p = room.players[seat];
+          if (p && p.socketId === socket.id) {
+            // If they haven't reconnected into this seat by now, unseat them
+            if (p.socketId === socket.id) {
+              room.players[seat] = null;
+              room.seatedCount = Math.max(0, room.seatedCount - 1);
+              broadcastState(roomId);
+            }
+            break;
+          }
         }
       }
-    }
+    }, DISCONNECT_TIMEOUT_MS);
   });
 
   /* ============================================================
@@ -373,7 +384,7 @@ io.on("connection", (socket) => {
       color: color || null,
       chips: 3,
       eliminated: false,
-      onGrace: false, // NEW: track grace state
+      onGrace: false, // track grace state
     };
     room.seatedCount++;
 
@@ -401,10 +412,19 @@ io.on("connection", (socket) => {
     const player = room.players[seat];
     if (!player || player.eliminated) return;
 
+    // Correct dice count based on chips
     const diceFaces = ["Dottt", "Dottt", "Dottt", "Left", "Right", "Wild", "Hub"];
     const rollResults = [];
 
-    for (let i = 0; i < 3; i++) {
+    const diceToRoll = Math.min(player.chips, 3);
+    if (diceToRoll <= 0) {
+      // No chips -> no roll; finalize turn (grace / elimination handled there)
+      finalizeTurn(roomId, seat);
+      broadcastState(roomId);
+      return;
+    }
+
+    for (let i = 0; i < diceToRoll; i++) {
       rollResults.push(
         diceFaces[Math.floor(Math.random() * diceFaces.length)]
       );
@@ -424,11 +444,13 @@ io.on("connection", (socket) => {
     let dots = rollResults.filter((r) => r === "Dottt").length;
     if (dots > 0 && player.chips > 0) {
       const chipsToGain = Math.min(dots, 3 - player.chips);
-      player.chips += chipsToGain;
-      io.to(roomId).emit("chipsGained", {
-        seat,
-        count: chipsToGain,
-      });
+      if (chipsToGain > 0) {
+        player.chips += chipsToGain;
+        io.to(roomId).emit("chipsGained", {
+          seat,
+          count: chipsToGain,
+        });
+      }
     }
 
     const wildCount = rollResults.filter((r) => r === "Wild").length;
@@ -509,7 +531,7 @@ io.on("connection", (socket) => {
       if (room.players[i]) {
         room.players[i].chips = 3;
         room.players[i].eliminated = false;
-        room.players[i].onGrace = false; // reset grace
+        room.players[i].onGrace = false;
       }
     }
 
