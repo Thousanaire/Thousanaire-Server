@@ -87,17 +87,15 @@ function finalizeTurn(roomId, seat) {
   const player = room.players[seat];
   if (!player) return;
 
-  // GRACE TURN LOGIC
+  // GRACE LOGIC
   if (player.chips <= 0) {
     if (!player.onGrace && !player.eliminated) {
-      // First time hitting 0 chips -> grace turn
       player.onGrace = true;
       io.to(roomId).emit("playerGrace", {
         seat,
         name: player.name,
       });
     } else if (player.onGrace && !player.eliminated) {
-      // Still 0 after grace -> eliminated
       player.eliminated = true;
       player.onGrace = false;
       io.to(roomId).emit("playerEliminated", {
@@ -106,7 +104,6 @@ function finalizeTurn(roomId, seat) {
       });
     }
   } else {
-    // If they have chips again, clear grace
     if (player.onGrace) {
       player.onGrace = false;
     }
@@ -137,12 +134,9 @@ function finalizeTurn(roomId, seat) {
 }
 
 /* ============================================================
-   WILD / OUTCOME LOGIC (MIRRORING OLD SINGLE-PLAYER RULES)
+   WILD / OUTCOME LOGIC (CORRECTED)
    ============================================================ */
 
-/**
- * Pure outcomes (no wild actions) – used when there are no Wilds.
- */
 function applyOutcomesOnlyServer(roomId, seat, outcomes) {
   const room = rooms[roomId];
   if (!room) return;
@@ -187,10 +181,10 @@ function applyOutcomesOnlyServer(roomId, seat, outcomes) {
   finalizeTurn(roomId, seat);
 }
 
-/**
- * Wild actions path – actions = [{type:"cancel", target:"Left|Right|Hub"}, {type:"steal", from:index}, ...]
- * Uses the original roll outcomes stored on the room.
- */
+/* ============================================================
+   CORRECTED WILD LOGIC (DROP‑IN REPLACEMENT)
+   ============================================================ */
+
 function applyWildActionsFromActions(roomId, seat, actions) {
   const room = rooms[roomId];
   if (!room) return;
@@ -201,45 +195,73 @@ function applyWildActionsFromActions(roomId, seat, actions) {
     room.lastRoll && room.lastRoll.seat === seat
       ? room.lastRoll.outcomes
       : null;
+
   if (!lastRoll) {
     finalizeTurn(roomId, seat);
     return;
   }
 
   const outcomes = lastRoll.slice();
+
+  // Track wilds by index
+  const wildIndices = outcomes
+    .map((o, i) => (o === "Wild" ? i : null))
+    .filter((i) => i !== null);
+
   const canceledIndices = new Set();
+  const wildUsedAsCancel = new Set();
+  const wildUsedAsSteal = new Set();
 
   // 1) Apply cancels and steals based on actions
   actions.forEach((a) => {
     if (!a) return;
 
+    // CANCEL
     if (a.type === "cancel") {
-      const target = a.target; // "Left" | "Right" | "Hub"
+      const target = a.target;
       const idx = outcomes.findIndex(
         (o, i) => o === target && !canceledIndices.has(i)
       );
       if (idx !== -1) {
         canceledIndices.add(idx);
+        if (typeof a.wildIndex === "number") {
+          wildUsedAsCancel.add(a.wildIndex);
+        }
       }
-    } else if (a.type === "steal") {
+    }
+
+    // STEAL
+    if (a.type === "steal") {
       const fromSeat = a.from;
       const target = room.players[fromSeat];
+
       if (target && target.chips > 0) {
         target.chips--;
         player.chips++;
+
         io.to(roomId).emit("chipTransfer", {
           fromSeat,
           toSeat: seat,
           type: "steal",
         });
+
+        if (typeof a.wildIndex === "number") {
+          wildUsedAsSteal.add(a.wildIndex);
+        }
       }
     }
   });
 
-  // 2) Apply remaining L/R/Hub outcomes that were NOT canceled
+  // 2) Apply remaining outcomes (L/R/Hub) that were NOT canceled
   outcomes.forEach((o, i) => {
     if (canceledIndices.has(i)) return;
-    if (o === "Wild") return; // Wilds already used as cancel/steal via actions
+
+    // Skip wilds that were used as cancel or steal
+    if (wildIndices.includes(i)) {
+      if (wildUsedAsCancel.has(i)) return;
+      if (wildUsedAsSteal.has(i)) return;
+      return; // unused wilds do nothing here
+    }
 
     if (o === "Left" && player.chips > 0) {
       const leftSeat = getNextSeat(room, seat);
@@ -250,7 +272,9 @@ function applyWildActionsFromActions(roomId, seat, actions) {
         toSeat: leftSeat,
         type: "left",
       });
-    } else if (o === "Right" && player.chips > 0) {
+    }
+
+    if (o === "Right" && player.chips > 0) {
       const rightSeat = getNextSeat(room, seat + 2);
       player.chips--;
       room.players[rightSeat].chips++;
@@ -259,7 +283,9 @@ function applyWildActionsFromActions(roomId, seat, actions) {
         toSeat: rightSeat,
         type: "right",
       });
-    } else if (o === "Hub" && player.chips > 0) {
+    }
+
+    if (o === "Hub" && player.chips > 0) {
       player.chips--;
       room.centerPot = (room.centerPot || 0) + 1;
       io.to(roomId).emit("chipTransfer", {
@@ -278,17 +304,14 @@ function applyWildActionsFromActions(roomId, seat, actions) {
   finalizeTurn(roomId, seat);
 }
 
-/**
- * Main entry – keeps old dual behavior:
- * - Array  => pure outcomes (no wild actions)
- * - Object => actions array (wild usage)
- */
+/* ============================================================
+   MAIN WILD ENTRY
+   ============================================================ */
+
 function applyWildActions(roomId, seat, outcomesOrActions) {
   if (Array.isArray(outcomesOrActions)) {
-    // No wild actions – just apply L/R/Hub
     applyOutcomesOnlyServer(roomId, seat, outcomesOrActions);
   } else {
-    // Wild actions from client
     const actions = outcomesOrActions;
     if (!Array.isArray(actions)) {
       finalizeTurn(roomId, seat);
@@ -306,7 +329,7 @@ io.on("connection", (socket) => {
   console.log(`Client connected: ${socket.id}`);
 
   socket.on("disconnect", () => {
-    const DISCONNECT_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+    const DISCONNECT_TIMEOUT_MS = 30 * 60 * 1000;
 
     setTimeout(() => {
       for (const roomId in rooms) {
@@ -314,7 +337,6 @@ io.on("connection", (socket) => {
         for (let seat = 0; seat < 4; seat++) {
           const p = room.players[seat];
           if (p && p.socketId === socket.id) {
-            // If they haven't reconnected into this seat by now, unseat them
             if (p.socketId === socket.id) {
               room.players[seat] = null;
               room.seatedCount = Math.max(0, room.seatedCount - 1);
@@ -384,7 +406,7 @@ io.on("connection", (socket) => {
       color: color || null,
       chips: 3,
       eliminated: false,
-      onGrace: false, // track grace state
+      onGrace: false,
     };
     room.seatedCount++;
 
@@ -412,13 +434,11 @@ io.on("connection", (socket) => {
     const player = room.players[seat];
     if (!player || player.eliminated) return;
 
-    // Correct dice count based on chips
     const diceFaces = ["Dottt", "Dottt", "Dottt", "Left", "Right", "Wild", "Hub"];
     const rollResults = [];
 
     const diceToRoll = Math.min(player.chips, 3);
     if (diceToRoll <= 0) {
-      // No chips -> no roll; finalize turn (grace / elimination handled there)
       finalizeTurn(roomId, seat);
       broadcastState(roomId);
       return;
@@ -432,7 +452,6 @@ io.on("connection", (socket) => {
 
     const outcomesText = rollResults.join(", ");
 
-    // Store last roll for Wild resolution
     room.lastRoll = { seat, outcomes: rollResults };
 
     io.to(roomId).emit("rollResult", {
@@ -468,7 +487,7 @@ io.on("connection", (socket) => {
   });
 
   /* ============================================================
-     RESOLVE WILDS (ACTIONS ARRAY)
+     RESOLVE WILDS
      ============================================================ */
 
   socket.on("resolveWilds", ({ roomId, actions }) => {
