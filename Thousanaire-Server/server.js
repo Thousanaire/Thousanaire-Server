@@ -481,21 +481,20 @@ io.on("connection", (socket) => {
   });
 
   /* ============================================================
-     RESOLVE WILDS — ⭐ FIXED ⭐
+     RESOLVE WILDS — FIXED
      ============================================================ */
 
   socket.on("resolveWilds", ({ roomId, seat, actions }) => {
     const room = rooms[roomId];
     if (!room) return;
 
-    // ⭐ FIX: Use the correct Wild-action engine
     applyWildActionsFromActions(roomId, seat, actions);
 
     broadcastState(roomId);
   });
 
   /* ============================================================
-     TRIPLE WILD CHOICE — ⭐ PATCHED ⭐
+     TRIPLE WILD CHOICE — FIXED
      ============================================================ */
 
   socket.on("tripleWildChoice", ({ roomId, seat, choice }) => {
@@ -529,6 +528,17 @@ io.on("connection", (socket) => {
 
     finalizeTurn(roomId, seat);
     broadcastState(roomId);
+  });
+
+  /* ============================================================
+     ⭐ CHAT SYSTEM — ADDED (ONLY CHANGE YOU REQUESTED)
+     ============================================================ */
+
+  socket.on("chatMessage", ({ roomId, name, text }) => {
+    const room = rooms[roomId];
+    if (!room) return;
+
+    io.to(roomId).emit("chatMessage", { name, text });
   });
 
   /* ============================================================
